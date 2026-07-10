@@ -34,6 +34,8 @@
 
 #include <oboe/Oboe.h>
 
+#include "Metronome.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -245,6 +247,9 @@ struct TrackState {
 // ---------------------------------------------------------------------------
 class AudioEngine {
  public:
+  // Scale trackCount/maxLoopSeconds by device class — large tablets (e.g.
+  // Galaxy Tab S9 Ultra) can afford 8 tracks x 120 s, small phones should
+  // stay near the defaults. AudioEngine.kt picks these at create() time.
   struct Config {
     int32_t sampleRate = 48000;   // engine-canonical rate; Oboe SRC pins both streams to it
     int32_t channelCount = 2;     // interleaved channels on both streams (H2n is stereo)
@@ -272,10 +277,20 @@ class AudioEngine {
   // Idle -> record master loop | RecordingMaster -> close loop, play |
   // Playing -> overdub armed track | Overdubbing -> back to playing.
   void toggleRecord();
-  void play();           // (re)start playback from the top of the loop
-  void stopPlayback();   // halt transport; cancels a master recording in progress
-  void clearAll();       // drop the loop and schedule all tracks for clearing
+  void startRecording();  // idempotent: no-op if already recording/overdubbing
+  void stopRecording();   // closes the master loop or ends the overdub pass
+  void play();            // (re)start playback from the top of the loop
+  void stopPlayback();    // halt transport; cancels a master recording in progress
+  void clearAll();        // drop the loop and schedule all tracks for clearing
   void clearTrack(int32_t track);
+
+  // ----- Metronome (control thread; single-atomic hand-off, applied at the
+  // next beat boundary — see Metronome.h) -----
+  void setMetronomeState(bool active, float bpm, int32_t beatsPerMeasure);
+  void setMetronomeGain(float gain);
+  bool metronomeActive() const { return mMetronome.isActive(); }
+  uint32_t metronomeBeatCount() const { return mMetronome.beatCount(); }
+  int32_t metronomeBeatInBar() const { return mMetronome.beatInBar(); }
 
   // ----- Parameters (control thread; plain atomic stores) -----
   void selectTrack(int32_t track);              // target for the next record/overdub
@@ -317,6 +332,8 @@ class AudioEngine {
   // tweaks go through plain atomics instead) -----
   enum class CommandType : uint8_t {
     ToggleRecord,
+    RecordStart,
+    RecordStop,
     Play,
     Stop,
     ClearAll,
@@ -369,6 +386,7 @@ class AudioEngine {
   // ----- Audio-thread helpers (realtime-safe) -----
   void drainCommands();
   void applyCommand(const Command& cmd);
+  void armRecording(EngineState current);
   void processPendingClears();
   void pullInput(float* dst, int32_t frames);
   void renderLooper(float* out, const float* in, int32_t frames);
@@ -416,8 +434,13 @@ class AudioEngine {
   std::atomic<int32_t> mLoopLengthFrames{0};  // published mirror of mLoopLen
   std::atomic<int32_t> mPlayheadFrames{0};    // published mirror of mPlayhead
   std::atomic<int32_t> mSelectedTrack{0};
-  std::atomic<float> mMonitorGain{1.0f};
+  // Default 0: hardware monitoring through the USB interface (e.g. the H2n)
+  // is assumed. Raise via setMonitorGain() for software monitoring.
+  std::atomic<float> mMonitorGain{0.0f};
   std::atomic<int32_t> mRecordOffset{0};
+
+  // Output-path-only click generator (never reaches the record path).
+  Metronome mMetronome;
 
   // ----- Counters (relaxed; forensics only) -----
   std::atomic<int64_t> mDriftDroppedFrames{0};

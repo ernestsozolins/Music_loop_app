@@ -36,18 +36,37 @@ USB mic ──> input stream callback ──> SpscSampleRing ──┐   (drift-
 - [x] **Phase 1 — Core engine & ring buffer** (`app/src/main/cpp/AudioEngine.{h,cpp}`):
       dual Oboe streams (Shared / LowLatency / Float), lock-free looper +
       overdub mixer, drift-corrected input path, RMS/peak metering.
-- [ ] **Phase 2 — JNI bridge + Kotlin/Compose UI** (transport controls, track
-      strip, live waveform).
-- [ ] **Phase 3 — Latency calibration** (loopback measurement feeding
+- [x] **Phase 2 — Metronome & JNI bridge** (`Metronome.h`,
+      `AudioEngine_JNI.cpp`, `AudioEngine.kt`): sample-accurate synthesized
+      click (downbeat 1500 Hz / offbeat 800 Hz, output-path only), lock-free
+      mid-song tempo changes, JNI control surface, 60 Hz meter-polling
+      coroutine, device-class-scaled engine config (tablet vs phone).
+- [ ] **Phase 3 — Compose UI**: transport controls, track strip, live
+      waveform; tablet-first adaptive layout (window size classes) for
+      Tab S9 Ultra-class devices, usable down to small phones.
+- [ ] **Phase 4 — Latency calibration** (loopback measurement feeding
       `setRecordOffsetFrames`), persistence, export.
 
-## Engine configuration (Phase 1 defaults)
+## Engine configuration
 
-| Knob | Default | Notes |
-|---|---|---|
-| Sample rate | 48 kHz | Engine-canonical; Oboe SRC pins both streams to it |
-| Channels | 2 | Interleaved float; H2n presents a stereo capture device |
-| Tracks | 4 | Compile-time max 8 |
-| Max loop length | 30 s | Pre-allocated: `tracks × seconds × rate × ch × 4 B` ≈ 46 MB at defaults |
-| Look-ahead cushion | 15 ms | Lower (e.g. 5 ms) for same-clock USB duplex rigs |
-| Drift slack | 5 ms | Deviation tolerated before frame slipping kicks in |
+`AudioEngine.kt#create()` scales the config by device class:
+
+| Knob | Phone | Tablet | Tab S9 Ultra class | Notes |
+|---|---|---|---|---|
+| Tracks | 4 | 6 | 8 | Compile-time max 8 |
+| Max loop length | 30 s | 60 s | 120 s | Pre-allocated: `tracks × seconds × rate × ch × 4 B` |
+| Sample rate | 48 kHz | ← | ← | Engine-canonical; Oboe SRC pins both streams to it |
+| Channels | 2 | ← | ← | Interleaved float; H2n presents a stereo capture device |
+| Look-ahead cushion | 15 ms | ← | ← | Lower (e.g. 5 ms) for same-clock USB duplex rigs |
+| Drift slack | 5 ms | ← | ← | Deviation tolerated before frame slipping kicks in |
+| Monitor gain | 0 | ← | ← | Hardware monitoring through the interface assumed; raise for software monitoring |
+
+### Metronome
+
+Fully synthesized in the callback (no sample assets): a sine burst with an
+exponential decay envelope (~45 ms to −80 dB), downbeat at 1500 Hz, offbeats
+at 800 Hz, onset click-free because the sine starts at phase 0. Tempo and
+time signature are packed into a single 64-bit atomic; changes land at the
+**next beat boundary**, so mid-bar BPM edits never glitch the phase. The
+click is mixed exclusively into the output buffer, after the record path has
+consumed the input — it can never end up on a recorded track.

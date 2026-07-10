@@ -73,6 +73,8 @@ AudioEngine::AudioEngine(const Config& config) : mConfig(config) {
     mTracks[t].data.assign(static_cast<size_t>(mMaxLoopFrames) * mConfig.channelCount, 0.0f);
   }
 
+  mMetronome.configure(mConfig.sampleRate, mConfig.channelCount);
+
   mInputCallback = std::make_shared<StreamCallback>(*this, oboe::Direction::Input);
   mOutputCallback = std::make_shared<StreamCallback>(*this, oboe::Direction::Output);
 }
@@ -244,9 +246,17 @@ void AudioEngine::pushCommand(const Command& cmd) {
 }
 
 void AudioEngine::toggleRecord() { pushCommand({CommandType::ToggleRecord, 0}); }
+void AudioEngine::startRecording() { pushCommand({CommandType::RecordStart, 0}); }
+void AudioEngine::stopRecording() { pushCommand({CommandType::RecordStop, 0}); }
 void AudioEngine::play() { pushCommand({CommandType::Play, 0}); }
 void AudioEngine::stopPlayback() { pushCommand({CommandType::Stop, 0}); }
 void AudioEngine::clearAll() { pushCommand({CommandType::ClearAll, 0}); }
+
+void AudioEngine::setMetronomeState(bool active, float bpm, int32_t beatsPerMeasure) {
+  mMetronome.setState(active, bpm, beatsPerMeasure);
+}
+
+void AudioEngine::setMetronomeGain(float gain) { mMetronome.setGain(gain); }
 
 void AudioEngine::clearTrack(int32_t track) {
   if (track < 0 || track >= mConfig.trackCount) return;
@@ -338,6 +348,19 @@ oboe::DataCallbackResult AudioEngine::onOutputReady(float* audioData, int32_t nu
   processPendingClears();
   pullInput(mInputScratch.data(), numFrames);
   renderLooper(audioData, mInputScratch.data(), numFrames);
+
+  // ROUTING INVARIANT: the metronome is mixed into the OUTPUT buffer only,
+  // strictly after renderLooper() has finished reading the input scratch and
+  // writing the loop tracks. It can reach headphones/speakers but never the
+  // input ring, the input scratch, or any track buffer — a click can never
+  // be recorded.
+  mMetronome.render(audioData, numFrames);
+
+  // Hard safety clamp on the final mix (loops + monitor + metronome); a
+  // proper look-ahead limiter is a later-phase item.
+  const int32_t samples = numFrames * mConfig.channelCount;
+  for (int32_t i = 0; i < samples; ++i) audioData[i] = clampf(audioData[i], -1.0f, 1.0f);
+
   publishMeters(mInputScratch.data(), audioData, numFrames);
   return oboe::DataCallbackResult::Continue;
 }
@@ -434,26 +457,25 @@ void AudioEngine::applyCommand(const Command& cmd) {
     case CommandType::ToggleRecord: {
       if (st == EngineState::RecordingMaster) {
         finalizeMasterLoop();
-        break;
-      }
-      if (st == EngineState::Overdubbing) {
+      } else if (st == EngineState::Overdubbing) {
         mState.store(EngineState::Playing, std::memory_order_relaxed);
-        break;
-      }
-      // Idle / Playing / Stopped: arm the selected track.
-      const int32_t track = clampTrackIndex(mSelectedTrack.load(std::memory_order_relaxed));
-      LoopTrack& t = mTracks[track];
-      if (t.clearing.load(std::memory_order_relaxed)) break;  // not armable mid-clear
-      mOverdubTrack = track;
-      if (mLoopLen == 0) {
-        // No master loop yet — this recording defines the loop length.
-        mMasterRecordPos = 0;
-        setPlayhead(0);
-        mState.store(EngineState::RecordingMaster, std::memory_order_relaxed);
       } else {
-        if (st == EngineState::Stopped) setPlayhead(0);  // overdub restarts from the top
-        t.hasContent.store(true, std::memory_order_relaxed);
-        mState.store(EngineState::Overdubbing, std::memory_order_relaxed);
+        armRecording(st);
+      }
+      break;
+    }
+    case CommandType::RecordStart: {
+      // Idempotent: ignored if a recording/overdub pass is already running.
+      if (st != EngineState::RecordingMaster && st != EngineState::Overdubbing) {
+        armRecording(st);
+      }
+      break;
+    }
+    case CommandType::RecordStop: {
+      if (st == EngineState::RecordingMaster) {
+        finalizeMasterLoop();
+      } else if (st == EngineState::Overdubbing) {
+        mState.store(EngineState::Playing, std::memory_order_relaxed);
       }
       break;
     }
@@ -496,6 +518,26 @@ void AudioEngine::applyCommand(const Command& cmd) {
       beginTrackClear(mTracks[track]);
       break;
     }
+  }
+}
+
+// Idle / Playing / Stopped -> start recording into the selected track: the
+// first-ever recording defines the master loop length; afterwards it's an
+// overdub pass (from Stopped, playback restarts at the top).
+void AudioEngine::armRecording(EngineState current) {
+  const int32_t track = clampTrackIndex(mSelectedTrack.load(std::memory_order_relaxed));
+  LoopTrack& t = mTracks[track];
+  if (t.clearing.load(std::memory_order_relaxed)) return;  // not armable mid-clear
+  mOverdubTrack = track;
+  if (mLoopLen == 0) {
+    // No master loop yet — this recording defines the loop length.
+    mMasterRecordPos = 0;
+    setPlayhead(0);
+    mState.store(EngineState::RecordingMaster, std::memory_order_relaxed);
+  } else {
+    if (current == EngineState::Stopped) setPlayhead(0);
+    t.hasContent.store(true, std::memory_order_relaxed);
+    mState.store(EngineState::Overdubbing, std::memory_order_relaxed);
   }
 }
 
@@ -602,9 +644,6 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
     }
     setPlayhead(ph);
   }
-
-  // Hard safety clamp; a proper look-ahead limiter is a later-phase item.
-  for (int32_t i = 0; i < samples; ++i) out[i] = clampf(out[i], -1.0f, 1.0f);
 }
 
 // ---------------------------------------------------------------------------
