@@ -93,6 +93,7 @@ struct WaveformPoint {
 // UI-facing snapshot of one track's parameters.
 struct TrackState {
   float gain = 1.0f;
+  float pan = 0.0f;  // -1 (left) .. 0 (center, unity) .. +1 (right)
   bool muted = false;
   bool hasContent = false;
   bool clearing = false;  // true while the amortized clear is still running
@@ -228,6 +229,10 @@ class AudioEngine {
   // ----- Parameters (control thread; plain atomic stores) -----
   void selectTrack(int32_t track);              // target for the next record/overdub
   void setTrackGain(int32_t track, float gain); // 0..4
+  // Balance-law pan for stereo output: center is unity on both channels,
+  // panning attenuates the opposite side only (no level jump for existing
+  // material). Ignored when the engine runs mono.
+  void setTrackPan(int32_t track, float pan);   // -1..1
   void setTrackMuted(int32_t track, bool muted);
   void setMonitorGain(float gain);              // live input passthrough level, 0..2
   // Round-trip compensation measured by the Phase-3 loopback calibration
@@ -248,6 +253,9 @@ class AudioEngine {
   int32_t playheadFrames() const { return mPlayheadFrames.load(std::memory_order_relaxed); }
   int32_t inputRingFillFrames() const { return mInputRing.framesReadable(); }
   TrackState trackState(int32_t track) const;
+  // Packed per-track flags for one-call UI polling: bit t = track t has
+  // content, bit (t+16) = track t is still clearing.
+  uint32_t trackContentMask() const;
 
   // Drift/xrun forensics — a healthy same-clock setup keeps all of these ~0.
   int64_t driftFramesDropped() const { return mDriftDroppedFrames.load(std::memory_order_relaxed); }
@@ -282,6 +290,7 @@ class AudioEngine {
   struct LoopTrack {
     std::vector<float> data;  // maxLoopFrames * channels, pre-touched
     std::atomic<float> gain{1.0f};
+    std::atomic<float> pan{0.0f};
     std::atomic<bool> muted{false};
     std::atomic<bool> hasContent{false};
     std::atomic<bool> clearing{false};

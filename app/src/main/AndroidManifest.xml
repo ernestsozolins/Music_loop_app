@@ -8,7 +8,18 @@
     <uses-feature android:name="android.hardware.audio.low_latency" android:required="false" />
     <uses-feature android:name="android.hardware.audio.pro" android:required="false" />
 
-    <application>
+    <application android:label="Loop Station">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Material.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <!-- Serves Session_Stems.zip (and individual wavs) as content:// Uris
              for the ACTION_SEND share sheet; see res/xml/file_paths.xml. -->
         <provider

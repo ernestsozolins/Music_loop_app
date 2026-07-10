@@ -321,7 +321,14 @@ class AudioEngine private constructor(private var handle: Long) {
 
     fun selectTrack(track: Int) { if (handle != 0L) nativeSelectTrack(handle, track) }
     fun setTrackGain(track: Int, gain: Float) { if (handle != 0L) nativeSetTrackGain(handle, track, gain) }
+
+    /** Balance-law pan, -1..1; center is unity on both channels. */
+    fun setTrackPan(track: Int, pan: Float) { if (handle != 0L) nativeSetTrackPan(handle, track, pan) }
     fun setTrackMuted(track: Int, muted: Boolean) { if (handle != 0L) nativeSetTrackMuted(handle, track, muted) }
+
+    /** Bit t = track t has content, bit (t+16) = track t is clearing. */
+    val trackContentMask: Int
+        get() = if (handle != 0L) nativeGetTrackContentMask(handle) else 0
 
     /** Software monitoring level. Default is 0: hardware monitoring through the interface. */
     fun setMonitorGain(gain: Float) { if (handle != 0L) nativeSetMonitorGain(handle, gain) }
@@ -536,7 +543,9 @@ class AudioEngine private constructor(private var handle: Long) {
 
     private external fun nativeSelectTrack(handle: Long, track: Int)
     private external fun nativeSetTrackGain(handle: Long, track: Int, gain: Float)
+    private external fun nativeSetTrackPan(handle: Long, track: Int, pan: Float)
     private external fun nativeSetTrackMuted(handle: Long, track: Int, muted: Boolean)
+    private external fun nativeGetTrackContentMask(handle: Long): Int
     private external fun nativeSetMonitorGain(handle: Long, gain: Float)
     private external fun nativeSetRecordOffsetFrames(handle: Long, frames: Int)
 

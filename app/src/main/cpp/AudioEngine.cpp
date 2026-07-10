@@ -424,6 +424,11 @@ void AudioEngine::setTrackGain(int32_t track, float gain) {
   mTracks[track].gain.store(clampf(gain, 0.0f, 4.0f), std::memory_order_relaxed);
 }
 
+void AudioEngine::setTrackPan(int32_t track, float pan) {
+  if (track < 0 || track >= mConfig.trackCount) return;
+  mTracks[track].pan.store(clampf(pan, -1.0f, 1.0f), std::memory_order_relaxed);
+}
+
 void AudioEngine::setTrackMuted(int32_t track, bool muted) {
   if (track < 0 || track >= mConfig.trackCount) return;
   mTracks[track].muted.store(muted, std::memory_order_relaxed);
@@ -448,10 +453,20 @@ TrackState AudioEngine::trackState(int32_t track) const {
   if (track < 0 || track >= mConfig.trackCount) return s;
   const LoopTrack& t = mTracks[track];
   s.gain = t.gain.load(std::memory_order_relaxed);
+  s.pan = t.pan.load(std::memory_order_relaxed);
   s.muted = t.muted.load(std::memory_order_relaxed);
   s.hasContent = t.hasContent.load(std::memory_order_relaxed);
   s.clearing = t.clearing.load(std::memory_order_relaxed);
   return s;
+}
+
+uint32_t AudioEngine::trackContentMask() const {
+  uint32_t mask = 0;
+  for (int32_t t = 0; t < mConfig.trackCount; ++t) {
+    if (mTracks[t].hasContent.load(std::memory_order_relaxed)) mask |= 1u << t;
+    if (mTracks[t].clearing.load(std::memory_order_relaxed)) mask |= 1u << (t + 16);
+  }
+  return mask;
 }
 
 double AudioEngine::outputLatencyMillis() const {
@@ -828,9 +843,11 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
       finalizeMasterLoop();  // hit capacity: close the loop automatically
     }
   } else if ((st == EngineState::Playing || st == EngineState::Overdubbing) && mLoopLen > 0) {
-    // Snapshot per-track parameters once per block, never per frame.
+    // Snapshot per-track parameters once per block, never per frame. Pan is
+    // a balance law: unity at center, attenuate the opposite side only.
     const float* srcs[kMaxTracks];
-    float gains[kMaxTracks];
+    float gainL[kMaxTracks];
+    float gainR[kMaxTracks];
     int32_t active = 0;
     for (int32_t t = 0; t < mConfig.trackCount; ++t) {
       LoopTrack& track = mTracks[t];
@@ -840,7 +857,10 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
         continue;
       }
       srcs[active] = track.data.data();
-      gains[active] = track.gain.load(std::memory_order_relaxed);
+      const float g = track.gain.load(std::memory_order_relaxed);
+      const float pan = (ch == 2) ? track.pan.load(std::memory_order_relaxed) : 0.0f;
+      gainL[active] = g * (pan > 0.0f ? 1.0f - pan : 1.0f);
+      gainR[active] = g * (pan < 0.0f ? 1.0f + pan : 1.0f);
       ++active;
     }
 
@@ -861,7 +881,8 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
       float* o = out + static_cast<size_t>(f) * ch;
       for (int32_t t = 0; t < active; ++t) {
         const float* s = srcs[t] + static_cast<size_t>(ph) * ch;
-        for (int32_t c = 0; c < ch; ++c) o[c] += s[c] * gains[t];
+        o[0] += s[0] * gainL[t];
+        if (ch == 2) o[1] += s[1] * gainR[t];
       }
       if (odData != nullptr) {
         const float* inF = in + static_cast<size_t>(f) * ch;

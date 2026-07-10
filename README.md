@@ -58,10 +58,17 @@ USB mic ──> input stream callback ──> SpscSampleRing ──┐   (drift-
       per-track float32 stem export on a worker thread, `StemExporter.kt`
       zipping stems + takes into `Session_Stems.zip`, and the FileProvider +
       ACTION_SEND share flow (`ui/ExportStemsButton.kt`).
-- [ ] **Phase 5 — Compose UI**: transport controls, track strip, live
-      waveform; tablet-first adaptive layout (window size classes) for
-      Tab S9 Ultra-class devices, usable down to small phones.
-- [ ] **Phase 6 — Persistence** (session save/restore, mixdown render).
+- [x] **Phase 4.5 — Compose multi-track UI** (`ui/MainViewModel.kt`,
+      `MainScreen.kt`, `TransportBar.kt`, `TrackRow.kt`, `MainActivity.kt`):
+      StateFlow-driven Material 3 UI — fixed transport bar (record / play /
+      stop / metronome / BPM / export), LazyColumn track grid with
+      mute/solo/volume/pan and the waveform area, keep-screen-on wake lock,
+      mic-permission flow. Engine gained per-track balance pan and a packed
+      track-content mask for one-call polling; solo is a ViewModel-side
+      mute matrix.
+- [ ] **Phase 5 — Build wiring & polish**: Gradle project (Compose + Oboe
+      Prefab + NDK), per-track offline waveforms, window-size-class layout
+      variants, persistence (session save/restore, mixdown render).
 
 ## Engine configuration
 

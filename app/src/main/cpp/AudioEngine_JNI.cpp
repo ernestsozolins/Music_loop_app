@@ -393,9 +393,21 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetTrackGain
   if (AudioEngine* engine = fromHandle(handle)) engine->setTrackGain(track, gain);
 }
 
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetTrackPan(
+    JNIEnv*, jobject, jlong handle, jint track, jfloat pan) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setTrackPan(track, pan);
+}
+
 JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetTrackMuted(
     JNIEnv*, jobject, jlong handle, jint track, jboolean muted) {
   if (AudioEngine* engine = fromHandle(handle)) engine->setTrackMuted(track, muted == JNI_TRUE);
+}
+
+// Bit t = track t has content, bit (t+16) = track t is clearing.
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetTrackContentMask(
+    JNIEnv*, jobject, jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? static_cast<jint>(engine->trackContentMask()) : 0;
 }
 
 JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetMonitorGain(JNIEnv*, jobject,
