@@ -2,16 +2,7 @@
 
 #include <cmath>
 
-#if defined(__ANDROID__)
-#include <android/log.h>
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "LooperEngine", __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, "LooperEngine", __VA_ARGS__)
-#else
-// Host builds (unit tests / static analysis) have no liblog.
-#define LOGI(...) ((void)0)
-#define LOGW(...) ((void)0)
-#endif
-// NOTE: LOGI/LOGW are control-plane only. Nothing in the onAudioReady path logs.
+#include "Log.h"
 
 namespace looper {
 
@@ -75,11 +66,20 @@ AudioEngine::AudioEngine(const Config& config) : mConfig(config) {
 
   mMetronome.configure(mConfig.sampleRate, mConfig.channelCount);
 
+  // The spooler's worker threads live for the engine's whole lifetime; the
+  // audio callbacks only ever touch its lock-free rings, so starting the
+  // threads here (before any stream exists) is race-free.
+  mSpooler.configure(mConfig.sampleRate, mConfig.channelCount, kMaxCallbackFrames);
+  mSpooler.start();
+
   mInputCallback = std::make_shared<StreamCallback>(*this, oboe::Direction::Input);
   mOutputCallback = std::make_shared<StreamCallback>(*this, oboe::Direction::Output);
 }
 
-AudioEngine::~AudioEngine() { stop(); }
+AudioEngine::~AudioEngine() {
+  stop();           // streams closed first: no audio callback can run past here
+  mSpooler.stop();  // then finalize any open files and join the worker threads
+}
 
 // ---------------------------------------------------------------------------
 // Lifecycle (control thread)
@@ -258,6 +258,29 @@ void AudioEngine::setMetronomeState(bool active, float bpm, int32_t beatsPerMeas
 
 void AudioEngine::setMetronomeGain(float gain) { mMetronome.setGain(gain); }
 
+void AudioEngine::setMetronomeSyncToLoop(bool enabled) {
+  mMetronomeSyncToLoop.store(enabled, std::memory_order_relaxed);
+}
+
+void AudioEngine::startCapture(const std::string& path, bool captureMix) {
+  mCaptureMixSource.store(captureMix, std::memory_order_relaxed);
+  mSpooler.startCapture(path);
+}
+
+void AudioEngine::stopCapture() { mSpooler.stopCapture(); }
+
+void AudioEngine::openBackingTrack(int32_t slot, const std::string& path, bool loop) {
+  mSpooler.openStream(slot, path, loop);
+}
+
+void AudioEngine::playBackingTrack(int32_t slot) { mSpooler.playStream(slot); }
+void AudioEngine::pauseBackingTrack(int32_t slot) { mSpooler.pauseStream(slot); }
+void AudioEngine::closeBackingTrack(int32_t slot) { mSpooler.closeStream(slot); }
+
+void AudioEngine::setBackingTrackGain(int32_t slot, float gain) {
+  mSpooler.setStreamGain(slot, gain);
+}
+
 void AudioEngine::clearTrack(int32_t track) {
   if (track < 0 || track >= mConfig.trackCount) return;
   pushCommand({CommandType::ClearTrack, track});
@@ -347,17 +370,48 @@ oboe::DataCallbackResult AudioEngine::onOutputReady(float* audioData, int32_t nu
   drainCommands();
   processPendingClears();
   pullInput(mInputScratch.data(), numFrames);
+
+  // Disk tee #1 (input source): hand the drift-corrected input — exactly
+  // what the looper records — to the DiskWriter through its lock-free ring.
+  // No file I/O happens on this thread; writeCaptureFrames self-gates.
+  if (!mCaptureMixSource.load(std::memory_order_relaxed)) {
+    mSpooler.writeCaptureFrames(mInputScratch.data(), numFrames);
+  }
+
+  // Snapshots for the metronome phase-lock: renderLooper() advances the
+  // playhead, but the click for THIS block must be computed against the
+  // block's starting position.
+  const EngineState stateAtBlockStart = mState.load(std::memory_order_relaxed);
+  const int32_t playheadAtBlockStart = mPlayhead;
+  const int32_t loopLenAtBlockStart = mLoopLen;
+
   renderLooper(audioData, mInputScratch.data(), numFrames);
+
+  // Backing tracks stream from disk into the output mix, under the loops.
+  // They are mixed AFTER the overdub path consumed the input, so like the
+  // metronome they can never be recorded into a loop track.
+  mSpooler.mixStreams(audioData, numFrames);
+
+  // Disk tee #2 (mix source): loops + monitor + backing tracks, deliberately
+  // BEFORE the metronome so the click never lands in the captured file.
+  if (mCaptureMixSource.load(std::memory_order_relaxed)) {
+    mSpooler.writeCaptureFrames(audioData, numFrames);
+  }
 
   // ROUTING INVARIANT: the metronome is mixed into the OUTPUT buffer only,
   // strictly after renderLooper() has finished reading the input scratch and
-  // writing the loop tracks. It can reach headphones/speakers but never the
-  // input ring, the input scratch, or any track buffer — a click can never
-  // be recorded.
-  mMetronome.render(audioData, numFrames);
+  // writing the loop tracks, and after both capture tees. It can reach
+  // headphones/speakers but never the input ring, the input scratch, any
+  // track buffer, or the capture file.
+  const bool locked = mMetronomeSyncToLoop.load(std::memory_order_relaxed) &&
+                      loopLenAtBlockStart > 0 &&
+                      (stateAtBlockStart == EngineState::Playing ||
+                       stateAtBlockStart == EngineState::Overdubbing);
+  mMetronome.render(audioData, numFrames, locked ? playheadAtBlockStart : -1,
+                    locked ? loopLenAtBlockStart : 0);
 
-  // Hard safety clamp on the final mix (loops + monitor + metronome); a
-  // proper look-ahead limiter is a later-phase item.
+  // Hard safety clamp on the final mix (loops + monitor + backing +
+  // metronome); a proper look-ahead limiter is a later-phase item.
   const int32_t samples = numFrames * mConfig.channelCount;
   for (int32_t i = 0; i < samples; ++i) audioData[i] = clampf(audioData[i], -1.0f, 1.0f);
 

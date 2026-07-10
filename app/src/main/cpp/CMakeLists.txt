@@ -5,7 +5,8 @@ project(looper_engine LANGUAGES CXX)
 
 add_library(looperengine SHARED
     AudioEngine.cpp
-    AudioEngine_JNI.cpp)
+    AudioEngine_JNI.cpp
+    DiskSpooler.cpp)
 
 target_compile_features(looperengine PUBLIC cxx_std_17)
 target_compile_options(looperengine PRIVATE -Wall -Wextra -O2)

@@ -16,6 +16,7 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <string>
 
 #include "AudioEngine.h"
 
@@ -29,6 +30,16 @@ constexpr int32_t kFloatsPerPoint = 7;
 constexpr int32_t kMaxPointsPerPoll = 128;
 
 AudioEngine* fromHandle(jlong handle) { return reinterpret_cast<AudioEngine*>(handle); }
+
+// Copies a jstring (e.g. a path built from Context.getFilesDir()) into a
+// std::string the worker threads can own safely after this JNI frame ends.
+std::string toStdString(JNIEnv* env, jstring s) {
+  if (s == nullptr) return {};
+  const char* chars = env->GetStringUTFChars(s, nullptr);
+  std::string out(chars != nullptr ? chars : "");
+  if (chars != nullptr) env->ReleaseStringUTFChars(s, chars);
+  return out;
+}
 
 }  // namespace
 
@@ -121,6 +132,13 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetMetronome
   if (AudioEngine* engine = fromHandle(handle)) engine->setMetronomeGain(gain);
 }
 
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetMetronomeSync(
+    JNIEnv*, jobject, jlong handle, jboolean enabled) {
+  if (AudioEngine* engine = fromHandle(handle)) {
+    engine->setMetronomeSyncToLoop(enabled == JNI_TRUE);
+  }
+}
+
 // Packed beat info for the UI flash: bit 7 = active, bits 0..6 = beat-in-bar,
 // bits 8+ = monotonic beat count. Must match AudioEngine.kt decoding.
 JNIEXPORT jlong JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetBeatInfo(JNIEnv*, jobject,
@@ -131,6 +149,87 @@ JNIEXPORT jlong JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetBeatInfo
   const jlong inBar = static_cast<jlong>(engine->metronomeBeatInBar() & 0x7F);
   const jlong active = engine->metronomeActive() ? 0x80 : 0x00;
   return (count << 8) | active | inBar;
+}
+
+// ---------------------------------------------------------------------------
+// Disk spooling — paths arrive from Kotlin (e.g. under
+// Context.getFilesDir().absolutePath); all file I/O runs on the spooler's
+// worker threads, never on this JNI frame's thread and never on audio threads.
+// ---------------------------------------------------------------------------
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeStartCapture(
+    JNIEnv* env, jobject, jlong handle, jstring path, jboolean captureMix) {
+  if (AudioEngine* engine = fromHandle(handle)) {
+    engine->startCapture(toStdString(env, path), captureMix == JNI_TRUE);
+  }
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeStopCapture(JNIEnv*, jobject,
+                                                                                jlong handle) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->stopCapture();
+}
+
+JNIEXPORT jboolean JNICALL Java_com_audio_loopstation_AudioEngine_nativeIsCapturing(JNIEnv*, jobject,
+                                                                                    jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  return (engine != nullptr && engine->isCapturing()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jlong JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetCapturedFrames(
+    JNIEnv*, jobject, jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->capturedFrames() : 0;
+}
+
+JNIEXPORT jlong JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetCaptureDroppedFrames(
+    JNIEnv*, jobject, jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->captureDroppedFrames() : 0;
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeOpenBackingTrack(
+    JNIEnv* env, jobject, jlong handle, jint slot, jstring path, jboolean loop) {
+  if (AudioEngine* engine = fromHandle(handle)) {
+    engine->openBackingTrack(slot, toStdString(env, path), loop == JNI_TRUE);
+  }
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativePlayBackingTrack(
+    JNIEnv*, jobject, jlong handle, jint slot) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->playBackingTrack(slot);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativePauseBackingTrack(
+    JNIEnv*, jobject, jlong handle, jint slot) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->pauseBackingTrack(slot);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeCloseBackingTrack(
+    JNIEnv*, jobject, jlong handle, jint slot) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->closeBackingTrack(slot);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetBackingTrackGain(
+    JNIEnv*, jobject, jlong handle, jint slot, jfloat gain) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setBackingTrackGain(slot, gain);
+}
+
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetBackingTrackState(
+    JNIEnv*, jobject, jlong handle, jint slot) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? static_cast<jint>(engine->backingTrackState(slot)) : 0;
+}
+
+JNIEXPORT jlong JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetBackingTrackPosition(
+    JNIEnv*, jobject, jlong handle, jint slot) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->backingTrackPositionFrames(slot) : 0;
+}
+
+JNIEXPORT jlong JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetBackingTrackLength(
+    JNIEnv*, jobject, jlong handle, jint slot) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->backingTrackLengthFrames(slot) : 0;
 }
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@ package com.audio.loopstation
 
 import android.app.ActivityManager
 import android.content.Context
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -129,6 +130,73 @@ class AudioEngine private constructor(private var handle: Long) {
 
     fun setMetronomeGain(gain: Float) { if (handle != 0L) nativeSetMetronomeGain(handle, gain) }
 
+    /**
+     * Phase-lock the click to the loop (default ON in the engine): while a
+     * loop plays or is overdubbed, the loop start is bar 1 beat 1 and the
+     * beat grid re-anchors at every loop wrap. Disable for a free-running
+     * click that ignores the loop.
+     */
+    fun setMetronomeSyncToLoop(enabled: Boolean) {
+        if (handle != 0L) nativeSetMetronomeSync(handle, enabled)
+    }
+
+    // ------------------------------------------------------------------
+    // Disk spooling — long-form capture and backing-track streaming.
+    // All file I/O runs on the engine's DiskWriter/DiskReader threads.
+    // ------------------------------------------------------------------
+
+    enum class BackingTrackState {
+        EMPTY, LOADING, READY, PLAYING, ENDED, ERROR;
+
+        companion object {
+            fun fromNative(ordinal: Int): BackingTrackState =
+                entries.getOrElse(ordinal) { EMPTY }
+        }
+    }
+
+    /**
+     * Starts spooling to a float32 .wav at [path] (create one with
+     * [newCaptureFile]). Asynchronous: poll [isCapturing]. With
+     * [captureMix] the full mix (loops + monitor + backing tracks, but
+     * never the metronome click) is captured instead of the raw input.
+     */
+    fun startCapture(path: String, captureMix: Boolean = false) {
+        if (handle != 0L) nativeStartCapture(handle, path, captureMix)
+    }
+
+    /** Finalizes the .wav (header patched) on the writer thread. */
+    fun stopCapture() { if (handle != 0L) nativeStopCapture(handle) }
+
+    val isCapturing: Boolean get() = handle != 0L && nativeIsCapturing(handle)
+    val capturedFrames: Long get() = if (handle != 0L) nativeGetCapturedFrames(handle) else 0L
+    val captureDroppedFrames: Long
+        get() = if (handle != 0L) nativeGetCaptureDroppedFrames(handle) else 0L
+
+    /**
+     * Loads a .wav into a streaming slot (0 until [BACKING_STREAM_SLOTS]).
+     * Requirements: 48 kHz, mono or stereo, 16-bit PCM or 32-bit float.
+     * Asynchronous: poll [backingTrackState] for READY or ERROR.
+     */
+    fun openBackingTrack(slot: Int, path: String, loop: Boolean = false) {
+        if (handle != 0L) nativeOpenBackingTrack(handle, slot, path, loop)
+    }
+
+    fun playBackingTrack(slot: Int) { if (handle != 0L) nativePlayBackingTrack(handle, slot) }
+    fun pauseBackingTrack(slot: Int) { if (handle != 0L) nativePauseBackingTrack(handle, slot) }
+    fun closeBackingTrack(slot: Int) { if (handle != 0L) nativeCloseBackingTrack(handle, slot) }
+    fun setBackingTrackGain(slot: Int, gain: Float) {
+        if (handle != 0L) nativeSetBackingTrackGain(handle, slot, gain)
+    }
+
+    fun backingTrackState(slot: Int): BackingTrackState =
+        BackingTrackState.fromNative(if (handle != 0L) nativeGetBackingTrackState(handle, slot) else 0)
+
+    fun backingTrackPositionFrames(slot: Int): Long =
+        if (handle != 0L) nativeGetBackingTrackPosition(handle, slot) else 0L
+
+    fun backingTrackLengthFrames(slot: Int): Long =
+        if (handle != 0L) nativeGetBackingTrackLength(handle, slot) else 0L
+
     // ------------------------------------------------------------------
     // Parameters
     // ------------------------------------------------------------------
@@ -229,6 +297,19 @@ class AudioEngine private constructor(private var handle: Long) {
         /** Bars kept in the rolling waveform history. */
         private const val WAVEFORM_BARS = 512
 
+        /** Must match kMaxBackingStreams in DiskSpooler.h. */
+        const val BACKING_STREAM_SLOTS = 2
+
+        /**
+         * Allocates a capture file in app-private storage — no runtime
+         * storage permission needed. Pass the returned absolute path to
+         * [startCapture].
+         */
+        fun newCaptureFile(context: Context): File {
+            val dir = File(context.filesDir, "takes").apply { mkdirs() }
+            return File(dir, "take_${System.currentTimeMillis()}.wav")
+        }
+
         /**
          * Creates an engine sized for the device class. Track memory is
          * `tracks * seconds * 48000 * 2ch * 4B`, so a Tab S9 Ultra-class
@@ -298,7 +379,23 @@ class AudioEngine private constructor(private var handle: Long) {
         beatsPerMeasure: Int,
     )
     private external fun nativeSetMetronomeGain(handle: Long, gain: Float)
+    private external fun nativeSetMetronomeSync(handle: Long, enabled: Boolean)
     private external fun nativeGetBeatInfo(handle: Long): Long
+
+    private external fun nativeStartCapture(handle: Long, path: String, captureMix: Boolean)
+    private external fun nativeStopCapture(handle: Long)
+    private external fun nativeIsCapturing(handle: Long): Boolean
+    private external fun nativeGetCapturedFrames(handle: Long): Long
+    private external fun nativeGetCaptureDroppedFrames(handle: Long): Long
+
+    private external fun nativeOpenBackingTrack(handle: Long, slot: Int, path: String, loop: Boolean)
+    private external fun nativePlayBackingTrack(handle: Long, slot: Int)
+    private external fun nativePauseBackingTrack(handle: Long, slot: Int)
+    private external fun nativeCloseBackingTrack(handle: Long, slot: Int)
+    private external fun nativeSetBackingTrackGain(handle: Long, slot: Int, gain: Float)
+    private external fun nativeGetBackingTrackState(handle: Long, slot: Int): Int
+    private external fun nativeGetBackingTrackPosition(handle: Long, slot: Int): Long
+    private external fun nativeGetBackingTrackLength(handle: Long, slot: Int): Long
 
     private external fun nativeSelectTrack(handle: Long, track: Int)
     private external fun nativeSetTrackGain(handle: Long, track: Int, gain: Float)

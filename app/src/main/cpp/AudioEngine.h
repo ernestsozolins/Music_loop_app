@@ -34,6 +34,8 @@
 
 #include <oboe/Oboe.h>
 
+#include "DiskSpooler.h"
+#include "LockFreeRing.h"
 #include "Metronome.h"
 
 #include <algorithm>
@@ -42,6 +44,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace looper {
@@ -57,158 +60,8 @@ constexpr int32_t kMaxDriftSlipFrames = 2;    // gentle drift: frames slipped pe
 constexpr int32_t kClearChunkFrames = 16384;  // amortized track-clear per callback
 constexpr int32_t kMaxCommandsPerBlock = 8;   // bounded command drain per callback
 
-// ---------------------------------------------------------------------------
-// SpscSampleRing
-//
-// Lock-free single-producer / single-consumer ring buffer of interleaved
-// float frames. Producer = input callback, consumer = output callback.
-// Uses monotonically increasing 64-bit positions (masked into a power-of-two
-// buffer) so full/empty are never ambiguous. Cache-line aligned indices keep
-// the two realtime threads from false-sharing.
-// ---------------------------------------------------------------------------
-class SpscSampleRing {
- public:
-  // Control thread only, before the streams start. Rounds the capacity up to
-  // a power of two and pre-touches the memory so the audio threads never
-  // fault a fresh page.
-  void allocate(int32_t capacityFrames, int32_t channelCount) {
-    int32_t cap = 1;
-    while (cap < capacityFrames) cap <<= 1;
-    mCapacityFrames = cap;
-    mMask = cap - 1;
-    mChannels = channelCount;
-    mData.assign(static_cast<size_t>(cap) * channelCount, 0.0f);
-    reset();
-  }
-
-  // Only safe while both producer and consumer are stopped.
-  void reset() {
-    mWritePos.store(0, std::memory_order_relaxed);
-    mReadPos.store(0, std::memory_order_relaxed);
-  }
-
-  int32_t capacityFrames() const { return mCapacityFrames; }
-
-  // Safe from any thread (value is approximate while the ring is active).
-  int32_t framesReadable() const {
-    return static_cast<int32_t>(mWritePos.load(std::memory_order_acquire) -
-                                mReadPos.load(std::memory_order_acquire));
-  }
-
-  int32_t framesWritable() const { return mCapacityFrames - framesReadable(); }
-
-  // PRODUCER only. Copies up to `frames` interleaved frames in; returns the
-  // count actually written. When the ring is full the newest frames are
-  // dropped — the consumer-side drift logic keeps that a rare event.
-  int32_t writeFrames(const float* src, int32_t frames) {
-    const uint64_t wr = mWritePos.load(std::memory_order_relaxed);
-    const uint64_t rd = mReadPos.load(std::memory_order_acquire);
-    const int32_t writable = mCapacityFrames - static_cast<int32_t>(wr - rd);
-    const int32_t n = std::min(frames, writable);
-    if (n > 0) {
-      copyIn(wr, src, n);
-      mWritePos.store(wr + n, std::memory_order_release);
-    }
-    return n;
-  }
-
-  // CONSUMER only. Copies up to `frames` out; returns the count actually
-  // read. Does not zero any shortfall — the caller pads.
-  int32_t readFrames(float* dst, int32_t frames) {
-    const uint64_t rd = mReadPos.load(std::memory_order_relaxed);
-    const uint64_t wr = mWritePos.load(std::memory_order_acquire);
-    const int32_t readable = static_cast<int32_t>(wr - rd);
-    const int32_t n = std::min(frames, readable);
-    if (n > 0) {
-      copyOut(rd, dst, n);
-      mReadPos.store(rd + n, std::memory_order_release);
-    }
-    return n;
-  }
-
-  // CONSUMER only. Drops the OLDEST `frames` without copying — this is the
-  // drift catch-up path. Returns the count actually discarded.
-  int32_t discardFrames(int32_t frames) {
-    const uint64_t rd = mReadPos.load(std::memory_order_relaxed);
-    const uint64_t wr = mWritePos.load(std::memory_order_acquire);
-    const int32_t n = std::min(frames, static_cast<int32_t>(wr - rd));
-    if (n > 0) {
-      mReadPos.store(rd + n, std::memory_order_release);
-    }
-    return n;
-  }
-
- private:
-  void copyIn(uint64_t pos, const float* src, int32_t frames) {
-    const int32_t start = static_cast<int32_t>(pos) & mMask;
-    const int32_t first = std::min(frames, mCapacityFrames - start);
-    std::memcpy(&mData[static_cast<size_t>(start) * mChannels], src,
-                static_cast<size_t>(first) * mChannels * sizeof(float));
-    if (frames > first) {
-      std::memcpy(mData.data(), src + static_cast<size_t>(first) * mChannels,
-                  static_cast<size_t>(frames - first) * mChannels * sizeof(float));
-    }
-  }
-
-  void copyOut(uint64_t pos, float* dst, int32_t frames) const {
-    const int32_t start = static_cast<int32_t>(pos) & mMask;
-    const int32_t first = std::min(frames, mCapacityFrames - start);
-    std::memcpy(dst, &mData[static_cast<size_t>(start) * mChannels],
-                static_cast<size_t>(first) * mChannels * sizeof(float));
-    if (frames > first) {
-      std::memcpy(dst + static_cast<size_t>(first) * mChannels, mData.data(),
-                  static_cast<size_t>(frames - first) * mChannels * sizeof(float));
-    }
-  }
-
-  std::vector<float> mData;
-  int32_t mCapacityFrames = 0;
-  int32_t mMask = 0;
-  int32_t mChannels = 1;
-
-  alignas(64) std::atomic<uint64_t> mWritePos{0};
-  alignas(64) std::atomic<uint64_t> mReadPos{0};
-};
-
-// ---------------------------------------------------------------------------
-// SpscQueue — lock-free SPSC queue of trivially copyable structs. Used for
-// the control->audio command queue and the audio->UI waveform meter queue.
-// ---------------------------------------------------------------------------
-template <typename T, uint32_t kCapacity>
-class SpscQueue {
-  static_assert((kCapacity & (kCapacity - 1)) == 0, "capacity must be a power of two");
-
- public:
-  // PRODUCER only. Returns false (drops the item) when full.
-  bool push(const T& item) {
-    const uint64_t wr = mWritePos.load(std::memory_order_relaxed);
-    const uint64_t rd = mReadPos.load(std::memory_order_acquire);
-    if (wr - rd >= kCapacity) return false;
-    mSlots[wr & (kCapacity - 1)] = item;
-    mWritePos.store(wr + 1, std::memory_order_release);
-    return true;
-  }
-
-  // CONSUMER only. Returns false when empty.
-  bool pop(T& out) {
-    const uint64_t rd = mReadPos.load(std::memory_order_relaxed);
-    const uint64_t wr = mWritePos.load(std::memory_order_acquire);
-    if (rd == wr) return false;
-    out = mSlots[rd & (kCapacity - 1)];
-    mReadPos.store(rd + 1, std::memory_order_release);
-    return true;
-  }
-
-  uint32_t size() const {
-    return static_cast<uint32_t>(mWritePos.load(std::memory_order_acquire) -
-                                 mReadPos.load(std::memory_order_acquire));
-  }
-
- private:
-  std::array<T, kCapacity> mSlots{};
-  alignas(64) std::atomic<uint64_t> mWritePos{0};
-  alignas(64) std::atomic<uint64_t> mReadPos{0};
-};
+// The SPSC ring/queue primitives live in LockFreeRing.h (shared with the
+// disk spooler).
 
 // ---------------------------------------------------------------------------
 // Public data types
@@ -288,9 +141,38 @@ class AudioEngine {
   // next beat boundary — see Metronome.h) -----
   void setMetronomeState(bool active, float bpm, int32_t beatsPerMeasure);
   void setMetronomeGain(float gain);
+  // Phase-lock the metronome to the loop: while a loop is playing or being
+  // overdubbed, the loop start is treated as bar 1 beat 1 and the beat grid
+  // re-anchors on every loop wrap (default ON — a free-running click drifts
+  // against an unquantized loop). While recording the master loop, or when
+  // no loop exists, the metronome free-runs regardless.
+  void setMetronomeSyncToLoop(bool enabled);
   bool metronomeActive() const { return mMetronome.isActive(); }
   uint32_t metronomeBeatCount() const { return mMetronome.beatCount(); }
   int32_t metronomeBeatInBar() const { return mMetronome.beatInBar(); }
+
+  // ----- Disk spooling (control thread; async — see DiskSpooler.h) -----
+  // Spools the recorded input (or the full mix, pre-metronome, when
+  // captureMix is true) to a float32 .wav via the DiskWriter thread.
+  void startCapture(const std::string& path, bool captureMix = false);
+  void stopCapture();
+  bool isCapturing() const { return mSpooler.isCapturing(); }
+  int64_t capturedFrames() const { return mSpooler.capturedFrames(); }
+  int64_t captureDroppedFrames() const { return mSpooler.captureDroppedFrames(); }
+  // Backing tracks stream from disk (DiskReader thread) into the output mix;
+  // they are never recorded into loop tracks.
+  void openBackingTrack(int32_t slot, const std::string& path, bool loop);
+  void playBackingTrack(int32_t slot);
+  void pauseBackingTrack(int32_t slot);
+  void closeBackingTrack(int32_t slot);
+  void setBackingTrackGain(int32_t slot, float gain);
+  StreamState backingTrackState(int32_t slot) const { return mSpooler.streamState(slot); }
+  int64_t backingTrackPositionFrames(int32_t slot) const {
+    return mSpooler.streamPositionFrames(slot);
+  }
+  int64_t backingTrackLengthFrames(int32_t slot) const {
+    return mSpooler.streamLengthFrames(slot);
+  }
 
   // ----- Parameters (control thread; plain atomic stores) -----
   void selectTrack(int32_t track);              // target for the next record/overdub
@@ -441,6 +323,12 @@ class AudioEngine {
 
   // Output-path-only click generator (never reaches the record path).
   Metronome mMetronome;
+  std::atomic<bool> mMetronomeSyncToLoop{true};
+
+  // Disk spooling: capture tee + backing-track streaming (worker threads
+  // owned by the spooler; the audio thread only touches its rings).
+  DiskSpooler mSpooler;
+  std::atomic<bool> mCaptureMixSource{false};  // false: input, true: mix
 
   // ----- Counters (relaxed; forensics only) -----
   std::atomic<int64_t> mDriftDroppedFrames{0};

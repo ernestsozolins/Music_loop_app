@@ -76,9 +76,20 @@ class Metronome {
   // AUDIO THREAD ONLY. Mixes the click into `out` (interleaved,
   // channelCount channels, `frames` frames). Output-path exclusive — see
   // the routing note in the file header.
-  void render(float* out, int32_t frames) {
+  //
+  // Free-running when loopLen <= 0. When the engine passes the loop playhead
+  // (loopPos = position at the first frame of this block, loopLen = loop
+  // length in frames), the metronome is PHASE-LOCKED to the loop: the loop
+  // start is bar 1 beat 1, and the beat grid re-anchors at every wrap, so
+  // the click can never drift against the recorded material. When the loop
+  // length is not an exact multiple of the beat period the seam interval is
+  // truncated — the wrap downbeat always wins. Switching between the two
+  // modes mid-flight is glitch-free: the grid simply re-anchors at the next
+  // wrap (locking) or keeps its current phase (unlocking).
+  void render(float* out, int32_t frames, int32_t loopPos = -1, int32_t loopLen = 0) {
     const uint64_t ctrl = mControl.load(std::memory_order_relaxed);
     const bool active = (ctrl & 1u) != 0;
+    const bool locked = active && loopLen > 0 && loopPos >= 0;
 
     if (active && !mWasActive) {
       // (Re)armed: the bar restarts and the downbeat fires immediately.
@@ -94,6 +105,12 @@ class Metronome {
     const float gain = mGain.load(std::memory_order_relaxed);
     for (int32_t f = 0; f < frames; ++f) {
       if (active) {
+        if (locked &&
+            static_cast<int32_t>((static_cast<int64_t>(loopPos) + f) % loopLen) == 0) {
+          // Loop wrapped exactly here: force bar 1 beat 1 on this frame.
+          mCountdown = 0.0;
+          mBeatInBar = -1;
+        }
         if (mCountdown <= 0.0) trigger(ctrl);
         mCountdown -= 1.0;
       }

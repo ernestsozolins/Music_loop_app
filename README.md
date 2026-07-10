@@ -41,10 +41,16 @@ USB mic ──> input stream callback ──> SpscSampleRing ──┐   (drift-
       click (downbeat 1500 Hz / offbeat 800 Hz, output-path only), lock-free
       mid-song tempo changes, JNI control surface, 60 Hz meter-polling
       coroutine, device-class-scaled engine config (tablet vs phone).
-- [ ] **Phase 3 — Compose UI**: transport controls, track strip, live
+- [x] **Phase 3 — Disk spooling & file management** (`DiskSpooler.{h,cpp}`):
+      DiskWriter/DiskReader background threads behind lock-free SPSC rings;
+      long-form capture appended to float32 .wav while recording; backing
+      tracks streamed from .wav (float32/PCM16) into the output mix; the
+      audio callback never touches a file. Plus: metronome phase-lock to the
+      loop (loop start = bar 1 beat 1, re-anchored every wrap).
+- [ ] **Phase 4 — Compose UI**: transport controls, track strip, live
       waveform; tablet-first adaptive layout (window size classes) for
       Tab S9 Ultra-class devices, usable down to small phones.
-- [ ] **Phase 4 — Latency calibration** (loopback measurement feeding
+- [ ] **Phase 5 — Latency calibration** (loopback measurement feeding
       `setRecordOffsetFrames`), persistence, export.
 
 ## Engine configuration
@@ -69,4 +75,27 @@ at 800 Hz, onset click-free because the sine starts at phase 0. Tempo and
 time signature are packed into a single 64-bit atomic; changes land at the
 **next beat boundary**, so mid-bar BPM edits never glitch the phase. The
 click is mixed exclusively into the output buffer, after the record path has
-consumed the input — it can never end up on a recorded track.
+consumed the input — it can never end up on a recorded track or in a
+captured file.
+
+**Phase lock (default ON):** while a loop plays or is overdubbed, the loop
+start is treated as bar 1 beat 1 and the beat grid re-anchors at every loop
+wrap, so the click never drifts against an unquantized loop. Disable via
+`setMetronomeSyncToLoop(false)` for a free-running click.
+
+### Disk spooling
+
+Long-form material never lives in RAM. Two background threads sit behind
+lock-free SPSC rings; the audio callback only ever touches the rings:
+
+- **DiskWriter** — `startCapture(path)` tees the drift-corrected input (or
+  the full pre-metronome mix) into a ~2.7 s ring; the writer appends it to a
+  float32 `.wav` and patches the RIFF header on `stopCapture()`. Interrupted
+  takes (unpatched headers) are still readable back.
+- **DiskReader** — up to 2 backing-track slots stream `.wav` files
+  (float32/PCM16, mono/stereo, 48 kHz) through ~1.4 s read-ahead rings into
+  the output mix. Open/play/pause/close/loop/gain per slot; backing audio is
+  mixed after the overdub path, so it is never recorded into loop tracks.
+
+Capture files live in app-private storage (`AudioEngine.newCaptureFile(context)`
+— no storage permission required).
