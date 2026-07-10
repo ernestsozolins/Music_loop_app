@@ -340,6 +340,43 @@ JNIEXPORT jlong JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetBackingT
 }
 
 // ---------------------------------------------------------------------------
+// Session finalization & stem export
+// ---------------------------------------------------------------------------
+
+// Flushes the remaining ring-buffer audio to disk, patches the RIFF/data
+// chunk sizes, and closes the capture file handle. BLOCKS up to
+// timeoutMillis — call from a background dispatcher, never the main thread.
+JNIEXPORT jboolean JNICALL Java_com_audio_loopstation_AudioEngine_nativeFlushAndCloseSession(
+    JNIEnv*, jobject, jlong handle, jint timeoutMillis) {
+  AudioEngine* engine = fromHandle(handle);
+  return (engine != nullptr && engine->flushAndCloseSession(timeoutMillis)) ? JNI_TRUE
+                                                                            : JNI_FALSE;
+}
+
+// Starts the asynchronous per-track stem export into `directory` (which must
+// already exist). Poll nativeGetExportState; count via
+// nativeGetExportedStemCount.
+JNIEXPORT jboolean JNICALL Java_com_audio_loopstation_AudioEngine_nativeExportStems(
+    JNIEnv* env, jobject, jlong handle, jstring directory) {
+  AudioEngine* engine = fromHandle(handle);
+  return (engine != nullptr && engine->exportStems(toStdString(env, directory))) ? JNI_TRUE
+                                                                                 : JNI_FALSE;
+}
+
+// AudioEngine::kExport*: 0 idle, 1 running, 2 done, 3 failed.
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetExportState(JNIEnv*, jobject,
+                                                                                   jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->exportState() : 0;
+}
+
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetExportedStemCount(
+    JNIEnv*, jobject, jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->exportedStemCount() : 0;
+}
+
+// ---------------------------------------------------------------------------
 // Parameters
 // ---------------------------------------------------------------------------
 

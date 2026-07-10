@@ -47,6 +47,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace looper {
@@ -201,6 +202,28 @@ class AudioEngine {
   int64_t backingTrackLengthFrames(int32_t slot) const {
     return mSpooler.streamLengthFrames(slot);
   }
+
+  // ----- Session finalization & stem export (control thread) -----
+  // Finalizes any active capture: the DiskWriter drains the remaining audio
+  // out of the lock-free ring to disk, patches the RIFF/fact/data chunk
+  // sizes, and closes the file handle. BLOCKS (bounded by timeoutMillis)
+  // until the file is safe to read/zip — call it off the main thread.
+  bool flushAndCloseSession(int32_t timeoutMillis = 5000);
+
+  // Writes every loop track that has content to `directory/track_NN.wav`
+  // (IEEE float32) on a dedicated worker thread — one stem per track, ready
+  // for a desktop DAW. Requires the transport to be quiet (not recording or
+  // overdubbing, no clear in progress); while the export runs, record-arm
+  // and clear commands are frozen so the worker reads stable track data
+  // (playback is still allowed — it only reads). Asynchronous: poll
+  // exportState(). Returns false if an export is already running.
+  static constexpr int32_t kExportIdle = 0;
+  static constexpr int32_t kExportRunning = 1;
+  static constexpr int32_t kExportDone = 2;
+  static constexpr int32_t kExportFailed = 3;
+  bool exportStems(const std::string& directory);
+  int32_t exportState() const { return mExportState.load(std::memory_order_acquire); }
+  int32_t exportedStemCount() const { return mExportedStems.load(std::memory_order_relaxed); }
 
   // ----- Parameters (control thread; plain atomic stores) -----
   void selectTrack(int32_t track);              // target for the next record/overdub
@@ -367,6 +390,16 @@ class AudioEngine {
   // Ping-and-listen round-trip measurement (audio-thread state machine).
   LatencyCalibrator mCalibrator;
   int64_t mAbsOutFrame = 0;  // monotonic output-frame counter (audio thread)
+
+  // Stem export worker (reads loop-track buffers; audio thread freezes
+  // track-mutating commands while mExportActive).
+  void exportThreadMain();
+  std::mutex mExportMutex;  // guards mExportThread spawn/join
+  std::thread mExportThread;
+  std::string mExportDir;  // set before spawn, read by the worker only
+  std::atomic<bool> mExportActive{false};
+  std::atomic<int32_t> mExportState{kExportIdle};
+  std::atomic<int32_t> mExportedStems{0};
 
   // Event push to the JNI layer (error thread -> Kotlin).
   std::mutex mEventMutex;

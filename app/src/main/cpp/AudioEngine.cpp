@@ -1,6 +1,8 @@
 #include "AudioEngine.h"
 
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 
 #include "Log.h"
 
@@ -82,7 +84,11 @@ AudioEngine::AudioEngine(const Config& config) : mConfig(config) {
 }
 
 AudioEngine::~AudioEngine() {
-  stop();           // streams closed first: no audio callback can run past here
+  stop();  // streams closed first: no audio callback can run past here
+  {
+    std::lock_guard<std::mutex> lock(mExportMutex);
+    if (mExportThread.joinable()) mExportThread.join();
+  }
   mSpooler.stop();  // then finalize any open files and join the worker threads
 }
 
@@ -326,6 +332,81 @@ void AudioEngine::closeBackingTrack(int32_t slot) { mSpooler.closeStream(slot); 
 
 void AudioEngine::setBackingTrackGain(int32_t slot, float gain) {
   mSpooler.setStreamGain(slot, gain);
+}
+
+// ---------------------------------------------------------------------------
+// Session finalization & stem export (control / worker threads)
+// ---------------------------------------------------------------------------
+
+bool AudioEngine::flushAndCloseSession(int32_t timeoutMillis) {
+  // Ask the DiskWriter to drain the capture ring to disk, patch the RIFF and
+  // data chunk sizes, and close the handle — then wait until it has.
+  mSpooler.stopCapture();
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMillis);
+  while (mSpooler.isCapturing()) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      LOGW("flushAndCloseSession timed out after %d ms", timeoutMillis);
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return true;
+}
+
+bool AudioEngine::exportStems(const std::string& directory) {
+  std::lock_guard<std::mutex> lock(mExportMutex);
+  if (mExportState.load(std::memory_order_acquire) == kExportRunning) return false;
+  if (mExportThread.joinable()) mExportThread.join();  // reap the previous run
+  mExportDir = directory;
+  mExportedStems.store(0, std::memory_order_relaxed);
+  // Freeze track-mutating commands FIRST, then verify preconditions on the
+  // worker after a grace window, so a record-arm racing this call either
+  // lands before the check (export fails) or is refused by the freeze.
+  mExportActive.store(true, std::memory_order_release);
+  mExportState.store(kExportRunning, std::memory_order_release);
+  mExportThread = std::thread([this] { exportThreadMain(); });
+  return true;
+}
+
+void AudioEngine::exportThreadMain() {
+  // Longer than one audio callback: any command already past the freeze is
+  // applied by now, so the state we read below is settled.
+  std::this_thread::sleep_for(std::chrono::milliseconds(25));
+
+  const EngineState st = mState.load(std::memory_order_acquire);
+  bool clearing = false;
+  for (int32_t t = 0; t < mConfig.trackCount; ++t) {
+    clearing = clearing || mTracks[t].clearing.load(std::memory_order_acquire);
+  }
+  if (st == EngineState::RecordingMaster || st == EngineState::Overdubbing || clearing) {
+    LOGW("stem export refused: tracks are being written");
+    mExportActive.store(false, std::memory_order_release);
+    mExportState.store(kExportFailed, std::memory_order_release);
+    return;
+  }
+
+  const int32_t loopLen = mLoopLengthFrames.load(std::memory_order_acquire);
+  bool ok = true;
+  int32_t written = 0;
+  if (loopLen > 0) {
+    for (int32_t t = 0; t < mConfig.trackCount; ++t) {
+      if (!mTracks[t].hasContent.load(std::memory_order_acquire)) continue;
+      char name[32];
+      std::snprintf(name, sizeof(name), "/track_%02d.wav", t + 1);
+      const int64_t n = mSpooler.writeWavFile(mExportDir + name, mTracks[t].data.data(), loopLen);
+      if (n == loopLen) {
+        mExportedStems.store(++written, std::memory_order_relaxed);
+      } else {
+        LOGW("stem export: track %d wrote %lld of %d frames", t + 1,
+             static_cast<long long>(n), loopLen);
+        ok = false;
+      }
+    }
+  }
+  LOGI("stem export finished: %d stem(s), loopLen=%d", written, loopLen);
+  mExportActive.store(false, std::memory_order_release);
+  mExportState.store(ok ? kExportDone : kExportFailed, std::memory_order_release);
 }
 
 void AudioEngine::clearTrack(int32_t track) {
@@ -577,6 +658,14 @@ void AudioEngine::applyCommand(const Command& cmd) {
 
   // While calibrating, the transport is frozen: only a cancel gets through.
   if (mCalibrator.active() && cmd.type != CommandType::CalibrateCancel) return;
+
+  // While the export worker reads the track buffers, anything that would
+  // write them (record-arm, clear) is refused; playback/stop still work.
+  if (mExportActive.load(std::memory_order_acquire) &&
+      (cmd.type == CommandType::ToggleRecord || cmd.type == CommandType::RecordStart ||
+       cmd.type == CommandType::ClearAll || cmd.type == CommandType::ClearTrack)) {
+    return;
+  }
 
   switch (cmd.type) {
     case CommandType::ToggleRecord: {

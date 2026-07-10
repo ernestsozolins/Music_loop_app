@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Paths the FileProvider may serve as content:// Uris. Only the exports
+     cache dir (the zip) needs to be shared; stems/takes are included so a
+     future "share single stem" action works without a manifest change. -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="exports" path="exports/" />
+    <files-path name="stems" path="stems/" />
+    <files-path name="takes" path="takes/" />
+</paths>

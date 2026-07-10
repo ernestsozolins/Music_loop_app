@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.min
 
@@ -278,6 +279,43 @@ class AudioEngine private constructor(private var handle: Long) {
         if (handle != 0L) nativeGetBackingTrackLength(handle, slot) else 0L
 
     // ------------------------------------------------------------------
+    // Session finalization & stem export
+    // ------------------------------------------------------------------
+
+    /**
+     * Flushes any audio still in the lock-free rings to disk, patches the
+     * RIFF/data chunk sizes, and closes the capture file handle. Blocking
+     * on the native side, so it runs on [Dispatchers.IO]. Returns false on
+     * timeout. Call before zipping/sharing the session's .wav files.
+     */
+    suspend fun flushAndCloseSession(timeoutMs: Long = 5_000): Boolean =
+        withContext(Dispatchers.IO) {
+            val h = handle
+            h != 0L && nativeFlushAndCloseSession(h, timeoutMs.toInt())
+        }
+
+    /**
+     * Writes one IEEE-float32 .wav per non-empty loop track into
+     * [directory] (created by the caller) on the engine's export worker.
+     * Requires the transport to be quiet (playing is fine; recording or
+     * clearing is not). Returns the number of stems written, or null on
+     * failure/timeout.
+     */
+    suspend fun exportStems(directory: String, timeoutMs: Long = 60_000): Int? {
+        val h = handle
+        if (h == 0L || !nativeExportStems(h, directory)) return null
+        val finalState = withTimeoutOrNull(timeoutMs) {
+            var state = nativeGetExportState(h)
+            while (state == EXPORT_RUNNING) {
+                delay(16)
+                state = nativeGetExportState(h)
+            }
+            state
+        } ?: return null
+        return if (finalState == EXPORT_DONE) nativeGetExportedStemCount(h) else null
+    }
+
+    // ------------------------------------------------------------------
     // Parameters
     // ------------------------------------------------------------------
 
@@ -384,6 +422,10 @@ class AudioEngine private constructor(private var handle: Long) {
         private const val CAL_RUNNING = 1
         private const val CAL_SUCCEEDED = 2
 
+        /** AudioEngine::kExport* values. */
+        private const val EXPORT_RUNNING = 1
+        private const val EXPORT_DONE = 2
+
         /**
          * Allocates a capture file in app-private storage — no runtime
          * storage permission needed. Pass the returned absolute path to
@@ -477,6 +519,11 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeIsCapturing(handle: Long): Boolean
     private external fun nativeGetCapturedFrames(handle: Long): Long
     private external fun nativeGetCaptureDroppedFrames(handle: Long): Long
+
+    private external fun nativeFlushAndCloseSession(handle: Long, timeoutMillis: Int): Boolean
+    private external fun nativeExportStems(handle: Long, directory: String): Boolean
+    private external fun nativeGetExportState(handle: Long): Int
+    private external fun nativeGetExportedStemCount(handle: Long): Int
 
     private external fun nativeOpenBackingTrack(handle: Long, slot: Int, path: String, loop: Boolean)
     private external fun nativePlayBackingTrack(handle: Long, slot: Int)

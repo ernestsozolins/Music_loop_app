@@ -53,10 +53,15 @@ USB mic ──> input stream callback ──> SpscSampleRing ──┐   (drift-
       restart); explicit same-rate + resampler policy on both streams; and
       ping-and-listen round-trip calibration that feeds the overdub record
       offset automatically.
-- [ ] **Phase 4 — Compose UI**: transport controls, track strip, live
+- [x] **Phase 4 — Track export & file packaging**: `flushAndCloseSession()`
+      (synchronous ring flush + RIFF/data size patching + handle close),
+      per-track float32 stem export on a worker thread, `StemExporter.kt`
+      zipping stems + takes into `Session_Stems.zip`, and the FileProvider +
+      ACTION_SEND share flow (`ui/ExportStemsButton.kt`).
+- [ ] **Phase 5 — Compose UI**: transport controls, track strip, live
       waveform; tablet-first adaptive layout (window size classes) for
       Tab S9 Ultra-class devices, usable down to small phones.
-- [ ] **Phase 5 — Persistence & export** (session save/restore, mixdown).
+- [ ] **Phase 6 — Persistence** (session save/restore, mixdown render).
 
 ## Engine configuration
 
@@ -104,6 +109,19 @@ lock-free SPSC rings; the audio callback only ever touches the rings:
 
 Capture files live in app-private storage (`AudioEngine.newCaptureFile(context)`
 — no storage permission required).
+
+### Export
+
+All engine audio is written as **IEEE 32-bit float WAV (format tag 3, with a
+`fact` chunk)** — no 16-bit truncation, so hot stems can be mixed down in a
+DAW without digital clipping. `flushAndCloseSession()` drains the lock-free
+rings to disk, patches the RIFF and `data` chunk sizes, and closes handles
+(blocking, bounded by a timeout). `exportStems(dir)` writes one .wav per
+non-empty loop track on a worker thread; record-arm and clear commands are
+frozen while it reads the track buffers (playback stays live). On the Kotlin
+side, `StemExporter` zips stems + capture takes into `Session_Stems.zip`
+(cache dir, FileProvider-mapped) and `ExportStemsButton` hands it to the
+system share sheet via `ACTION_SEND`.
 
 ### Engine safety
 

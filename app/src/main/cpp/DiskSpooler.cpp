@@ -388,6 +388,28 @@ void DiskSpooler::mixStreams(float* dst, int32_t frames) {
 }
 
 // ---------------------------------------------------------------------------
+// Export helper — synchronous, caller's (non-realtime) thread
+// ---------------------------------------------------------------------------
+
+int64_t DiskSpooler::writeWavFile(const std::string& path, const float* interleaved,
+                                  int64_t frames) {
+  WavWriter wav;
+  if (!wav.open(path, mSampleRate, mChannels)) {
+    LOGW("export: failed to open %s", path.c_str());
+    return -1;
+  }
+  int64_t done = 0;
+  while (done < frames) {
+    const int32_t n =
+        static_cast<int32_t>(std::min<int64_t>(kWriterChunkFrames, frames - done));
+    if (wav.writeFrames(interleaved + done * mChannels, n) != n) break;  // disk full?
+    done += n;
+  }
+  wav.close();  // patches RIFF/fact/data sizes
+  return done;
+}
+
+// ---------------------------------------------------------------------------
 // DiskWriter thread — the ONLY place capture-file I/O happens
 // ---------------------------------------------------------------------------
 
