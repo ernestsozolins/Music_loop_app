@@ -31,6 +31,10 @@ oboe::DataCallbackResult AudioEngine::StreamCallback::onAudioReady(oboe::AudioSt
   return mEngine.onOutputReady(static_cast<float*>(audioData), numFrames);
 }
 
+bool AudioEngine::StreamCallback::onError(oboe::AudioStream* /*stream*/, oboe::Result error) {
+  return mEngine.onStreamError(mDirection, error);
+}
+
 void AudioEngine::StreamCallback::onErrorAfterClose(oboe::AudioStream* stream, oboe::Result error) {
   mEngine.onStreamErrorAfterClose(stream, error);
 }
@@ -65,6 +69,7 @@ AudioEngine::AudioEngine(const Config& config) : mConfig(config) {
   }
 
   mMetronome.configure(mConfig.sampleRate, mConfig.channelCount);
+  mCalibrator.configure(mConfig.sampleRate, mConfig.channelCount);
 
   // The spooler's worker threads live for the engine's whole lifetime; the
   // audio callbacks only ever touch its lock-free rings, so starting the
@@ -139,10 +144,15 @@ void AudioEngine::stopLocked() {
 
 oboe::Result AudioEngine::openStreams() {
   // Two independent streams, deliberately NOT a forced full-duplex pair.
-  // Both are pinned to the same nominal sample rate via Oboe's sample-rate
-  // conversion, so the ring-buffer frame math is consistent even when the
-  // devices run at different native rates. Residual clock drift between the
-  // two hardware clocks is handled by pullInput().
+  //
+  // SAMPLE-RATE UNIFICATION: both builders explicitly request the same
+  // engine rate (setSampleRate below) AND enable Oboe's internal resampler
+  // (setSampleRateConversionQuality(Medium)). If the external USB hardware
+  // only supports a different native rate (e.g. a 44.1 kHz-only interface),
+  // Oboe resamples to the requested rate instead of delivering mismatched
+  // frames — without this, audio crossing the input->output ring would be
+  // pitch-shifted by the rate ratio. Residual clock drift between the two
+  // hardware clocks is then handled by pullInput().
   oboe::AudioStreamBuilder outBuilder;
   outBuilder.setDirection(oboe::Direction::Output)
       ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
@@ -215,21 +225,46 @@ void AudioEngine::closeStreams() {
 void AudioEngine::onStreamErrorAfterClose(oboe::AudioStream* stream, oboe::Result error) {
   // Runs on a non-realtime thread owned by Oboe/AAudio, so locking and
   // reopening streams here is legal (this is the pattern Oboe's own duplex
-  // samples use). Fired when a device disappears — e.g. the USB interface
-  // or Bluetooth headset disconnects.
+  // samples use). The immediate protective actions already ran in
+  // onStreamError(); this stage attempts the recovery restart.
   if (error != oboe::Result::ErrorDisconnected) return;
 
-  std::lock_guard<std::mutex> lock(mLifecycleMutex);
-  if (!mUserRunning.load(std::memory_order_acquire)) return;
-  // Ignore stale events from a stream generation we already replaced.
-  if (stream != mInputStream.get() && stream != mOutputStream.get()) return;
+  bool attempted = false;
+  oboe::Result result = oboe::Result::OK;
+  {
+    std::lock_guard<std::mutex> lock(mLifecycleMutex);
+    if (!mUserRunning.load(std::memory_order_acquire)) return;
+    // Ignore stale events from a stream generation we already replaced.
+    if (stream != mInputStream.get() && stream != mOutputStream.get()) return;
 
-  LOGI("stream disconnected; restarting duplex pair on current default devices");
-  stopLocked();
-  const oboe::Result result = startLocked();
-  if (result != oboe::Result::OK) {
-    LOGW("restart after disconnect failed: %s", oboe::convertToText(result));
+    LOGI("restarting duplex pair on current default devices");
+    stopLocked();
+    result = startLocked();
+    attempted = true;
+    if (result != oboe::Result::OK) {
+      LOGW("restart after disconnect failed: %s", oboe::convertToText(result));
+    }
   }
+  // Fire outside the lifecycle lock so a listener reacting to the event can
+  // safely call back into the engine.
+  if (attempted) {
+    fireEvent(result == oboe::Result::OK ? EventType::RestartSucceeded : EventType::RestartFailed,
+              static_cast<int32_t>(result));
+  }
+}
+
+void AudioEngine::setEventCallback(EventCallback callback) {
+  std::lock_guard<std::mutex> lock(mEventMutex);
+  mEventCallback = std::move(callback);
+}
+
+void AudioEngine::fireEvent(EventType type, int32_t arg) {
+  EventCallback callback;
+  {
+    std::lock_guard<std::mutex> lock(mEventMutex);
+    callback = mEventCallback;
+  }
+  if (callback) callback(static_cast<int32_t>(type), arg);
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +296,18 @@ void AudioEngine::setMetronomeGain(float gain) { mMetronome.setGain(gain); }
 void AudioEngine::setMetronomeSyncToLoop(bool enabled) {
   mMetronomeSyncToLoop.store(enabled, std::memory_order_relaxed);
 }
+
+void AudioEngine::calibrateLatency() {
+  if (!isRunning()) {
+    // No streams -> the command queue is not draining; fail immediately
+    // rather than leaving a stale command to fire on some future start().
+    mCalibrator.markFailed();
+    return;
+  }
+  pushCommand({CommandType::CalibrateStart, 0});
+}
+
+void AudioEngine::cancelCalibration() { pushCommand({CommandType::CalibrateCancel, 0}); }
 
 void AudioEngine::startCapture(const std::string& path, bool captureMix) {
   mCaptureMixSource.store(captureMix, std::memory_order_relaxed);
@@ -364,12 +411,32 @@ oboe::DataCallbackResult AudioEngine::onOutputReady(float* audioData, int32_t nu
     std::memset(audioData, 0,
                 static_cast<size_t>(numFrames) * mConfig.channelCount * sizeof(float));
     mOversizeCallbackCount.fetch_add(1, std::memory_order_relaxed);
+    mAbsOutFrame += numFrames;  // keep the calibration timeline honest
     return oboe::DataCallbackResult::Continue;
   }
 
   drainCommands();
   processPendingClears();
   pullInput(mInputScratch.data(), numFrames);
+
+  if (mCalibrator.active()) {
+    // Calibration owns the block: silence + ping burst out, threshold scan
+    // on the same drift-corrected input the looper records, one timeline
+    // (mAbsOutFrame) for both — so the measured delta is exactly the offset
+    // an overdub needs. Looper/monitor/backing/metronome are all suppressed
+    // so nothing competes with the ping.
+    mCalibrator.process(audioData, mInputScratch.data(), numFrames, mAbsOutFrame);
+    if (!mCalibrator.active() &&
+        mCalibrator.state() == LatencyCalibrator::State::Succeeded) {
+      // Apply immediately: overdubs are now written this many frames behind
+      // the playhead (same clamp as setRecordOffsetFrames).
+      mRecordOffset.store(std::min(mCalibrator.latencyFrames(), mConfig.sampleRate),
+                          std::memory_order_relaxed);
+    }
+    publishMeters(mInputScratch.data(), audioData, numFrames);
+    mAbsOutFrame += numFrames;
+    return oboe::DataCallbackResult::Continue;
+  }
 
   // Disk tee #1 (input source): hand the drift-corrected input — exactly
   // what the looper records — to the DiskWriter through its lock-free ring.
@@ -416,6 +483,7 @@ oboe::DataCallbackResult AudioEngine::onOutputReady(float* audioData, int32_t nu
   for (int32_t i = 0; i < samples; ++i) audioData[i] = clampf(audioData[i], -1.0f, 1.0f);
 
   publishMeters(mInputScratch.data(), audioData, numFrames);
+  mAbsOutFrame += numFrames;
   return oboe::DataCallbackResult::Continue;
 }
 
@@ -507,6 +575,9 @@ void AudioEngine::drainCommands() {
 void AudioEngine::applyCommand(const Command& cmd) {
   const EngineState st = mState.load(std::memory_order_relaxed);
 
+  // While calibrating, the transport is frozen: only a cancel gets through.
+  if (mCalibrator.active() && cmd.type != CommandType::CalibrateCancel) return;
+
   switch (cmd.type) {
     case CommandType::ToggleRecord: {
       if (st == EngineState::RecordingMaster) {
@@ -570,6 +641,21 @@ void AudioEngine::applyCommand(const Command& cmd) {
       }
       mTracks[track].hasContent.store(false, std::memory_order_relaxed);
       beginTrackClear(mTracks[track]);
+      break;
+    }
+    case CommandType::CalibrateStart: {
+      // Preconditions: transport quiet and no capture running (the ping
+      // must not compete with programme audio or land in a take).
+      const bool transportQuiet = (st == EngineState::Idle || st == EngineState::Stopped);
+      if (!transportQuiet || mSpooler.isCapturing()) {
+        mCalibrator.markFailed();
+        break;
+      }
+      mCalibrator.begin(mAbsOutFrame);
+      break;
+    }
+    case CommandType::CalibrateCancel: {
+      mCalibrator.cancel();
       break;
     }
   }

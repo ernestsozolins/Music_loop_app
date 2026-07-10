@@ -16,6 +16,7 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <memory>
 #include <string>
 
 #include "AudioEngine.h"
@@ -23,6 +24,40 @@
 namespace {
 
 using looper::AudioEngine;
+
+JavaVM* gVm = nullptr;
+
+// Attaches the current thread to the JVM if needed (engine events arrive on
+// Oboe's error thread, which the JVM has never seen) and detaches on scope
+// exit only if this scope did the attach.
+class ScopedEnv {
+ public:
+  ScopedEnv() {
+    if (gVm == nullptr) return;
+    if (gVm->GetEnv(reinterpret_cast<void**>(&mEnv), JNI_VERSION_1_6) == JNI_EDETACHED) {
+      // The NDK declares AttachCurrentThread(JNIEnv**, ...); desktop JDKs
+      // (used for host static analysis) declare (void**, ...).
+#if defined(__ANDROID__)
+      const jint rc = gVm->AttachCurrentThread(&mEnv, nullptr);
+#else
+      const jint rc = gVm->AttachCurrentThread(reinterpret_cast<void**>(&mEnv), nullptr);
+#endif
+      if (rc == JNI_OK) {
+        mAttached = true;
+      } else {
+        mEnv = nullptr;
+      }
+    }
+  }
+  ~ScopedEnv() {
+    if (mAttached) gVm->DetachCurrentThread();
+  }
+  JNIEnv* get() const { return mEnv; }
+
+ private:
+  JNIEnv* mEnv = nullptr;
+  bool mAttached = false;
+};
 
 // One flattened WaveformPoint = [inputRms, inputPeak, mixRms, mixPeak,
 // playheadFrames, loopLengthFrames, state]. Must match AudioEngine.kt.
@@ -44,6 +79,11 @@ std::string toStdString(JNIEnv* env, jstring s) {
 }  // namespace
 
 extern "C" {
+
+JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
+  gVm = vm;
+  return JNI_VERSION_1_6;
+}
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -67,7 +107,45 @@ JNIEXPORT jlong JNICALL Java_com_audio_loopstation_AudioEngine_nativeCreate(
 
 JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeDestroy(JNIEnv*, jobject,
                                                                             jlong handle) {
-  delete fromHandle(handle);  // ~AudioEngine() stops and closes the streams
+  AudioEngine* engine = fromHandle(handle);
+  if (engine == nullptr) return;
+  engine->setEventCallback(nullptr);  // drop the Kotlin listener ref first
+  delete engine;                      // ~AudioEngine() stops and closes the streams
+}
+
+// Registers `listener` (the Kotlin AudioEngine instance) to receive engine
+// events via its `onNativeEvent(int type, int arg)` method. Events originate
+// on Oboe's non-realtime error thread; ScopedEnv attaches it to the JVM per
+// event. Pass null to unregister. The global ref is held by the callback
+// closure and released (on a JVM-attached thread) when it is replaced or the
+// engine is destroyed.
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetEventListener(
+    JNIEnv* env, jobject, jlong handle, jobject listener) {
+  AudioEngine* engine = fromHandle(handle);
+  if (engine == nullptr) return;
+  if (listener == nullptr) {
+    engine->setEventCallback(nullptr);
+    return;
+  }
+  jclass cls = env->GetObjectClass(listener);
+  const jmethodID method = env->GetMethodID(cls, "onNativeEvent", "(II)V");
+  env->DeleteLocalRef(cls);
+  if (method == nullptr) {
+    env->ExceptionClear();
+    return;
+  }
+  std::shared_ptr<_jobject> ref(env->NewGlobalRef(listener), [](jobject obj) {
+    if (obj == nullptr) return;
+    ScopedEnv scoped;
+    if (scoped.get() != nullptr) scoped.get()->DeleteGlobalRef(obj);
+  });
+  engine->setEventCallback([ref, method](int32_t type, int32_t arg) {
+    ScopedEnv scoped;
+    JNIEnv* e = scoped.get();
+    if (e == nullptr) return;
+    e->CallVoidMethod(ref.get(), method, static_cast<jint>(type), static_cast<jint>(arg));
+    if (e->ExceptionCheck()) e->ExceptionClear();  // never propagate into the error thread
+  });
 }
 
 JNIEXPORT jboolean JNICALL Java_com_audio_loopstation_AudioEngine_nativeStart(JNIEnv*, jobject,
@@ -114,6 +192,35 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeClearTrack(J
                                                                                jlong handle,
                                                                                jint track) {
   if (AudioEngine* engine = fromHandle(handle)) engine->clearTrack(track);
+}
+
+// ---------------------------------------------------------------------------
+// Latency calibration (ping-and-listen)
+// ---------------------------------------------------------------------------
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeStartCalibration(
+    JNIEnv*, jobject, jlong handle) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->calibrateLatency();
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeCancelCalibration(
+    JNIEnv*, jobject, jlong handle) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->cancelCalibration();
+}
+
+// LatencyCalibrator::State: 0 idle, 1 running, 2 succeeded, 3 failed.
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetCalibrationState(
+    JNIEnv*, jobject, jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->calibrationState() : 0;
+}
+
+// Last successful round-trip measurement in frames, -1 if none yet. On
+// success the engine has already applied it as the overdub record offset.
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetCalibratedLatencyFrames(
+    JNIEnv*, jobject, jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->calibratedLatencyFrames() : -1;
 }
 
 // ---------------------------------------------------------------------------

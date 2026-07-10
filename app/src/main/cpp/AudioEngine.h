@@ -35,6 +35,7 @@
 #include <oboe/Oboe.h>
 
 #include "DiskSpooler.h"
+#include "LatencyCalibrator.h"
 #include "LockFreeRing.h"
 #include "Metronome.h"
 
@@ -42,6 +43,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -125,6 +127,32 @@ class AudioEngine {
   oboe::Result start();
   void stop();
   bool isRunning() const { return mUserRunning.load(std::memory_order_acquire); }
+
+  // ----- Engine events -----
+  // Fired from Oboe's non-realtime error thread (never from the audio
+  // callbacks) when a device disconnects (e.g. USB interface unplugged) and
+  // after the automatic restart attempt. The JNI layer forwards these to
+  // Kotlin. Keep the callback quick; it must not destroy the engine.
+  enum class EventType : int32_t {
+    InputDisconnected = 0,
+    OutputDisconnected = 1,
+    RestartSucceeded = 2,
+    RestartFailed = 3,
+  };
+  using EventCallback = std::function<void(int32_t type, int32_t arg)>;
+  void setEventCallback(EventCallback callback);  // control thread
+
+  // ----- Latency calibration (ping-and-listen; see LatencyCalibrator.h) -----
+  // Requires: engine running, transport Idle/Stopped, capture off. Injects
+  // 2 ms / 3 kHz bursts into the output and times their return on the input.
+  // On success the measured round trip is applied as the overdub record
+  // offset automatically. Asynchronous: poll calibrationState().
+  void calibrateLatency();
+  void cancelCalibration();
+  int32_t calibrationState() const {  // LatencyCalibrator::State as int
+    return static_cast<int32_t>(mCalibrator.state());
+  }
+  int32_t calibratedLatencyFrames() const { return mCalibrator.latencyFrames(); }
 
   // ----- Transport (control thread; lock-free hand-off to the audio thread) -----
   // Idle -> record master loop | RecordingMaster -> close loop, play |
@@ -220,6 +248,8 @@ class AudioEngine {
     Stop,
     ClearAll,
     ClearTrack,
+    CalibrateStart,
+    CalibrateCancel,
   };
   struct Command {
     CommandType type;
@@ -246,6 +276,7 @@ class AudioEngine {
 
     oboe::DataCallbackResult onAudioReady(oboe::AudioStream* stream, void* audioData,
                                           int32_t numFrames) override;
+    bool onError(oboe::AudioStream* stream, oboe::Result error) override;
     void onErrorAfterClose(oboe::AudioStream* stream, oboe::Result error) override;
 
    private:
@@ -256,7 +287,10 @@ class AudioEngine {
   // ----- Audio-thread entry points -----
   oboe::DataCallbackResult onInputReady(const float* audioData, int32_t numFrames);
   oboe::DataCallbackResult onOutputReady(float* audioData, int32_t numFrames);
+  // Error-thread entry points (non-realtime thread owned by Oboe/AAudio)
+  bool onStreamError(oboe::Direction direction, oboe::Result error);
   void onStreamErrorAfterClose(oboe::AudioStream* stream, oboe::Result error);
+  void fireEvent(EventType type, int32_t arg);
 
   // ----- Control-plane helpers (mLifecycleMutex held) -----
   oboe::Result startLocked();
@@ -329,6 +363,14 @@ class AudioEngine {
   // owned by the spooler; the audio thread only touches its rings).
   DiskSpooler mSpooler;
   std::atomic<bool> mCaptureMixSource{false};  // false: input, true: mix
+
+  // Ping-and-listen round-trip measurement (audio-thread state machine).
+  LatencyCalibrator mCalibrator;
+  int64_t mAbsOutFrame = 0;  // monotonic output-frame counter (audio thread)
+
+  // Event push to the JNI layer (error thread -> Kotlin).
+  std::mutex mEventMutex;
+  EventCallback mEventCallback;
 
   // ----- Counters (relaxed; forensics only) -----
   std::atomic<int64_t> mDriftDroppedFrames{0};

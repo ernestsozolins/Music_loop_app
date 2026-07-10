@@ -7,11 +7,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.min
 
 /**
@@ -40,6 +44,39 @@ import kotlin.math.min
  * ```
  */
 class AudioEngine private constructor(private var handle: Long) {
+
+    init {
+        // Route native engine events (device disconnects, restart results)
+        // into [events]. Registered before any stream can exist.
+        nativeSetEventListener(handle, this)
+    }
+
+    /**
+     * Engine events pushed from native (a non-main thread): the USB
+     * interface or headset vanished, and how the automatic recovery went.
+     * On DISCONNECTED the engine has already paused the transport and
+     * finalized any capture file — the UI's job is to warn the user.
+     */
+    enum class EngineEvent {
+        INPUT_DISCONNECTED, OUTPUT_DISCONNECTED, RESTART_SUCCEEDED, RESTART_FAILED, UNKNOWN;
+
+        companion object {
+            fun fromNative(type: Int): EngineEvent = entries.getOrElse(type) { UNKNOWN }
+        }
+    }
+
+    private val _events = MutableSharedFlow<EngineEvent>(extraBufferCapacity = 16)
+    val events: SharedFlow<EngineEvent> = _events.asSharedFlow()
+
+    /**
+     * Called from native on Oboe's error thread. Keep the name/signature in
+     * sync with AudioEngine_JNI.cpp (and keep it from being minified:
+     * `-keepclassmembers class com.audio.loopstation.AudioEngine { void onNativeEvent(int, int); }`).
+     */
+    @Suppress("unused")
+    private fun onNativeEvent(type: Int, arg: Int) {
+        _events.tryEmit(EngineEvent.fromNative(type))
+    }
 
     /** Mirrors looper::EngineState — keep the order in sync with AudioEngine.h. */
     enum class State {
@@ -92,10 +129,53 @@ class AudioEngine private constructor(private var handle: Long) {
         val h = handle
         handle = 0L
         if (h != 0L) {
+            nativeSetEventListener(h, null)
             nativeStop(h)
             nativeDestroy(h)
         }
     }
+
+    // ------------------------------------------------------------------
+    // Latency calibration
+    // ------------------------------------------------------------------
+
+    /**
+     * Ping-and-listen round-trip measurement. Preconditions: engine started,
+     * transport stopped, capture off; monitor speakers (or a loopback cable)
+     * must reach the microphone. Suspends until the run finishes and returns
+     * the latency in frames — already applied by the engine as the overdub
+     * record offset — or null on failure/timeout.
+     */
+    suspend fun calibrateLatency(timeoutMs: Long = 10_000): Int? {
+        val h = handle
+        if (h == 0L) return null
+        nativeStartCalibration(h)
+        val finalState = withTimeoutOrNull(timeoutMs) {
+            var state = nativeGetCalibrationState(h)
+            while (state == CAL_RUNNING) {
+                delay(16)
+                state = nativeGetCalibrationState(h)
+            }
+            state
+        }
+        if (finalState == null) {  // timed out: abort the run
+            nativeCancelCalibration(h)
+            return null
+        }
+        return if (finalState == CAL_SUCCEEDED) nativeGetCalibratedLatencyFrames(h) else null
+    }
+
+    /** Last successful measurement in frames (-1 if never calibrated). */
+    val calibratedLatencyFrames: Int
+        get() = if (handle != 0L) nativeGetCalibratedLatencyFrames(handle) else -1
+
+    /** Same, as milliseconds for display. */
+    val calibratedLatencyMillis: Float
+        get() {
+            val frames = calibratedLatencyFrames
+            val rate = sampleRate
+            return if (frames >= 0 && rate > 0) frames * 1000f / rate else -1f
+        }
 
     // ------------------------------------------------------------------
     // Transport
@@ -300,6 +380,10 @@ class AudioEngine private constructor(private var handle: Long) {
         /** Must match kMaxBackingStreams in DiskSpooler.h. */
         const val BACKING_STREAM_SLOTS = 2
 
+        /** LatencyCalibrator::State values. */
+        private const val CAL_RUNNING = 1
+        private const val CAL_SUCCEEDED = 2
+
         /**
          * Allocates a capture file in app-private storage — no runtime
          * storage permission needed. Pass the returned absolute path to
@@ -364,6 +448,12 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeDestroy(handle: Long)
     private external fun nativeStart(handle: Long): Boolean
     private external fun nativeStop(handle: Long)
+    private external fun nativeSetEventListener(handle: Long, listener: Any?)
+
+    private external fun nativeStartCalibration(handle: Long)
+    private external fun nativeCancelCalibration(handle: Long)
+    private external fun nativeGetCalibrationState(handle: Long): Int
+    private external fun nativeGetCalibratedLatencyFrames(handle: Long): Int
 
     private external fun nativeStartRecording(handle: Long)
     private external fun nativeStopRecording(handle: Long)

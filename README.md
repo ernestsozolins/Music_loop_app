@@ -47,11 +47,16 @@ USB mic ──> input stream callback ──> SpscSampleRing ──┐   (drift-
       tracks streamed from .wav (float32/PCM16) into the output mix; the
       audio callback never touches a file. Plus: metronome phase-lock to the
       loop (loop start = bar 1 beat 1, re-anchored every wrap).
+- [x] **Phase 3.5 — Engine safety & latency calibration**
+      (`LatencyCalibrator.h`): `onError` disconnect protection (transport
+      paused, capture finalized, event pushed to Kotlin, automatic device
+      restart); explicit same-rate + resampler policy on both streams; and
+      ping-and-listen round-trip calibration that feeds the overdub record
+      offset automatically.
 - [ ] **Phase 4 — Compose UI**: transport controls, track strip, live
       waveform; tablet-first adaptive layout (window size classes) for
       Tab S9 Ultra-class devices, usable down to small phones.
-- [ ] **Phase 5 — Latency calibration** (loopback measurement feeding
-      `setRecordOffsetFrames`), persistence, export.
+- [ ] **Phase 5 — Persistence & export** (session save/restore, mixdown).
 
 ## Engine configuration
 
@@ -99,3 +104,26 @@ lock-free SPSC rings; the audio callback only ever touches the rings:
 
 Capture files live in app-private storage (`AudioEngine.newCaptureFile(context)`
 — no storage permission required).
+
+### Engine safety
+
+Both streams implement `onError`: on device disconnect (USB interface or
+Bluetooth sink unplugged) the engine immediately pauses the transport,
+finalizes any capture file so the take on disk stays valid, pushes a
+thread-safe event to Kotlin (`AudioEngine.events` SharedFlow), then attempts
+an automatic restart on the current default devices and reports the outcome.
+Both stream builders request the engine rate explicitly with Oboe's internal
+resampler enabled (`SampleRateConversionQuality::Medium`), so hardware that
+only runs at another native rate is resampled instead of pitch-shifted.
+
+### Latency calibration
+
+`calibrateLatency()` (suspend fun in Kotlin) runs ping-and-listen: three
+2 ms Hann-windowed 3 kHz sine bursts are injected into the output; the input
+feed is scanned for each return against a noise-floor-calibrated threshold.
+Measured on one output-frame timeline, the delta captures the full recording
+round trip (output buffer → DAC → air/cable → ADC → resampler → input ring
+cushion). Two pings must agree within 1 ms; the result is applied as the
+overdub record offset, so overdubs land exactly where the performer heard
+the loop. Failure (noisy room, no loopback path) is reported cleanly and
+never overwrites the last good value.
