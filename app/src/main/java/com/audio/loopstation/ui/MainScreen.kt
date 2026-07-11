@@ -16,8 +16,10 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -50,6 +52,24 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+    var showSessions by remember { mutableStateOf(false) }
+
+    if (showSessions) {
+        val sessions by viewModel.sessions.collectAsStateWithLifecycle()
+        SessionBrowserSheet(
+            sessions = sessions,
+            onLoad = { id ->
+                showSessions = false
+                scope.launch {
+                    if (!viewModel.loadSession(id)) {
+                        snackbar.showSnackbar("Couldn't load — stop recording first")
+                    }
+                }
+            },
+            onDelete = viewModel::deleteSession,
+            onDismiss = { showSessions = false },
+        )
+    }
 
     // Device disconnects arrive from the engine's error thread; warn the user.
     LaunchedEffect(viewModel) {
@@ -92,6 +112,15 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 onMetronomeToggle = viewModel::onMetronomeToggle,
                 onBpmChange = viewModel::onBpmChange,
                 onExportTap = onExportTap,
+                onCountInToggle = viewModel::onCountInToggle,
+                onQuantizeToggle = viewModel::onQuantizeToggle,
+                onSaveTap = {
+                    scope.launch {
+                        val ok = viewModel.saveSession()
+                        snackbar.showSnackbar(if (ok) "Session saved" else "Save failed")
+                    }
+                },
+                onSessionsTap = { showSessions = true },
             )
         },
     ) { innerPadding ->
@@ -117,6 +146,10 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
             )
         }
 
+        val smartButton: @Composable () -> Unit = {
+            SmartLoopButton(transport = transport, onTap = viewModel::onSmartLoopButton)
+        }
+
         if (twoPane) {
             LazyVerticalGrid(
                 columns = GridCells.Fixed(2),
@@ -127,6 +160,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                item(key = "loop", span = { GridItemSpan(maxLineSpan) }) { smartButton() }
                 items(tracks, key = { it.index }) { trackRow(it) }
                 item(key = "fx", span = { GridItemSpan(maxLineSpan) }) { fxPanel() }
             }
@@ -138,6 +172,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 contentPadding = PaddingValues(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                item(key = "loop") { smartButton() }
                 items(tracks, key = { it.index }) { trackRow(it) }
                 item(key = "fx") { fxPanel() }
             }

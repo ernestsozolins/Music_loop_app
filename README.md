@@ -106,6 +106,33 @@ USB mic ──> input stream callback ──> SpscSampleRing ──┐   (drift-
       (Backspace restores an overdub's previous layers instead of wiping
       the track); window-size-class two-pane grid on expanded widths.
 
+## Enhancements (post-blueprint)
+
+Beyond the seven-phase blueprint, the app adds:
+
+- **Look-ahead master limiter** (`Limiter.h`) on the monitoring mix — stacked
+  loops stay clip-free; its 5 ms latency is folded into the calibration.
+- **Count-in & bar-quantized loops** — with the click on, master recording
+  starts on the next downbeat and its length snaps to whole bars.
+- **On-screen smart loop button** — the whole record → close → overdub →
+  next-track workflow on one oversized button, so the app is fully playable
+  on a tablet **without a foot pedal**.
+- **MIDI foot-pedal support** (`MidiPedalController.kt`) alongside the
+  existing HID-keyboard pedal path — USB-MIDI and paired BLE-MIDI controllers
+  drive the transport.
+- **Per-pass undo** — Backspace restores an overdub's previous layers (native
+  snapshot), not just a whole-track wipe.
+- **Offline per-track waveforms** — recorded rows show their actual loop audio.
+- **dB-calibrated faders** — track volume follows a −48…+6 dB taper with unity
+  at ~0.8, instead of a linear slider.
+- **Backing-track resampling** — any-rate `.wav` backing tracks are resampled
+  to the engine rate on the reader thread instead of being rejected.
+- **Multichannel input mapping** — pick a stereo pair from a 4-channel
+  interface (e.g. an H2n surround mode).
+- **Session persistence UI** — autosave on background, a **Save** button, and
+  a **Sessions** browser (load/delete) backed by Room Flows.
+- **Adaptive tablet layout** — expanded-width windows use a two-column grid.
+
 ## Building & installing
 
 Prerequisites: [Android Studio](https://developer.android.com/studio)

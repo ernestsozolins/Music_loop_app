@@ -38,6 +38,9 @@ class SessionRepository(database: LoopStationDatabase) {
     /** The "last active" session = the most recently saved one. */
     suspend fun latestSessionWithTracks(): SessionWithTracks? = dao.latestSessionWithTracks()
 
+    /** A specific session with its tracks (session browser "load"). */
+    suspend fun sessionWithTracks(id: Long): SessionWithTracks? = dao.sessionWithTracks(id)
+
     // ----- Save protocol -----
 
     /**

@@ -4,20 +4,24 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.Button
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledIconToggleButton
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,6 +51,10 @@ fun TransportBar(
     onMetronomeToggle: () -> Unit,
     onBpmChange: (Int) -> Unit,
     onExportTap: () -> Unit,
+    onCountInToggle: () -> Unit,
+    onQuantizeToggle: () -> Unit,
+    onSaveTap: () -> Unit,
+    onSessionsTap: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Surface(modifier = modifier, tonalElevation = 3.dp) {
@@ -122,13 +130,37 @@ fun TransportBar(
                     Icon(Icons.Filled.Share, contentDescription = "Export stems")
                 }
             }
+            // Secondary options row: count-in / quantize / save / sessions.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilterChip(
+                    selected = transport.countIn,
+                    onClick = onCountInToggle,
+                    label = { Text("Count-in") },
+                )
+                FilterChip(
+                    selected = transport.quantize,
+                    onClick = onQuantizeToggle,
+                    label = { Text("Quantize") },
+                )
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onSessionsTap) { Text("Sessions") }
+                Button(onClick = onSaveTap, enabled = !transport.saving) {
+                    Text(if (transport.saving) "Saving…" else "Save")
+                }
+            }
             Text(
                 text = "Pedal:  Space = Play/Stop   •   Enter = Overdub/Next   •   Backspace = Undo",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier
                     .align(Alignment.CenterHorizontally)
-                    .padding(bottom = 6.dp),
+                    .padding(vertical = 6.dp),
             )
         }
     }

@@ -197,6 +197,9 @@ class AudioEngine private constructor(private var handle: Long) {
     fun clearAll() { if (handle != 0L) nativeClearAll(handle) }
     fun clearTrack(track: Int) { if (handle != 0L) nativeClearTrack(handle, track) }
 
+    /** Immediate loop/content reset (no buffer wipe) — precedes [restoreSession]. */
+    fun resetLoopForRestore() { if (handle != 0L) nativeResetLoopForRestore(handle) }
+
     // ------------------------------------------------------------------
     // Metronome
     // ------------------------------------------------------------------
@@ -626,6 +629,7 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeStopPlayback(handle: Long)
     private external fun nativeClearAll(handle: Long)
     private external fun nativeClearTrack(handle: Long, track: Int)
+    private external fun nativeResetLoopForRestore(handle: Long)
 
     private external fun nativeSetMetronomeState(
         handle: Long,

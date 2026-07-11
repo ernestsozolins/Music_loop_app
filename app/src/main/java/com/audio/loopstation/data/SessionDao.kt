@@ -35,6 +35,10 @@ interface SessionDao {
     @Query("SELECT * FROM sessions ORDER BY timestamp DESC LIMIT 1")
     suspend fun latestSessionWithTracks(): SessionWithTracks?
 
+    @Transaction
+    @Query("SELECT * FROM sessions WHERE id = :id")
+    suspend fun sessionWithTracks(id: Long): SessionWithTracks?
+
     @Query("SELECT * FROM sessions WHERE id = :id")
     suspend fun sessionById(id: Long): SessionEntity?
 

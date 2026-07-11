@@ -321,6 +321,7 @@ void AudioEngine::stopRecording() { pushCommand({CommandType::RecordStop, 0}); }
 void AudioEngine::play() { pushCommand({CommandType::Play, 0}); }
 void AudioEngine::stopPlayback() { pushCommand({CommandType::Stop, 0}); }
 void AudioEngine::clearAll() { pushCommand({CommandType::ClearAll, 0}); }
+void AudioEngine::resetLoopForRestore() { pushCommand({CommandType::ResetForRestore, 0}); }
 
 void AudioEngine::setMetronomeState(bool active, float bpm, int32_t beatsPerMeasure) {
   mMetronome.setState(active, bpm, beatsPerMeasure);
@@ -1014,6 +1015,19 @@ void AudioEngine::applyCommand(const Command& cmd) {
     }
     case CommandType::UndoCommit: {
       mTracks[clampTrackIndex(cmd.intArg)].hasContent.store(true, std::memory_order_relaxed);
+      break;
+    }
+    case CommandType::ResetForRestore: {
+      // Drop loop + content immediately, no amortized wipe (restore
+      // overwrites the buffers). Only from a quiet transport.
+      mState.store(EngineState::Idle, std::memory_order_relaxed);
+      setLoopLength(0);
+      setPlayhead(0);
+      mMasterRecordPos = 0;
+      mMasterStopAt = 0;
+      for (int32_t t = 0; t < mConfig.trackCount; ++t) {
+        mTracks[t].hasContent.store(false, std::memory_order_relaxed);
+      }
       break;
     }
     case CommandType::RestoreCommit: {

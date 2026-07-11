@@ -194,6 +194,11 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeClearTrack(J
   if (AudioEngine* engine = fromHandle(handle)) engine->clearTrack(track);
 }
 
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeResetLoopForRestore(
+    JNIEnv*, jobject, jlong handle) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->resetLoopForRestore();
+}
+
 // ---------------------------------------------------------------------------
 // Output monitoring reverb — parameters are lock-free atomics, safe to drive
 // from a UI slider mid-performance. Applied to the headphone/speaker mix

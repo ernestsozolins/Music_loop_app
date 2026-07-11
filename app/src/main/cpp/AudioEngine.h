@@ -169,6 +169,11 @@ class AudioEngine {
   void stopPlayback();    // halt transport; cancels a master recording in progress
   void clearAll();        // drop the loop and schedule all tracks for clearing
   void clearTrack(int32_t track);
+  // Immediately drop loop state + all content flags WITHOUT wiping the track
+  // buffers (no amortized clear). Used before restoreSession(), which
+  // overwrites the buffers anyway — avoids a multi-second clear racing the
+  // restore worker.
+  void resetLoopForRestore();
 
   // ----- Metronome (control thread; single-atomic hand-off, applied at the
   // next beat boundary — see Metronome.h) -----
@@ -362,6 +367,7 @@ class AudioEngine {
     RestoreCommit,  // audio thread adopts the loop the restore worker loaded
     UndoMute,       // mixer stops reading a track so undo can rewrite it
     UndoCommit,     // undo finished rewriting: content is valid again
+    ResetForRestore,  // immediate loop/content reset without wiping buffers
   };
   struct Command {
     CommandType type;

@@ -38,6 +38,7 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
     private val pedal by lazy { PedalController(viewModel) }
+    private val midiPedal by lazy { MidiPedalController(applicationContext, viewModel) }
 
     private var recordingService: MediaRecordingService? = null
     private var micPermissionGranted = false
@@ -120,9 +121,14 @@ class MainActivity : ComponentActivity() {
             serviceConnection,
             Context.BIND_AUTO_CREATE,
         )
+        midiPedal.start()  // attach MIDI foot controllers while visible
     }
 
     override fun onStop() {
+        midiPedal.stop()
+        // Persist the session on the way to the background so nothing is
+        // lost; the service keeps the process alive long enough to finish.
+        viewModel.autosaveIfNeeded()
         // Detach the UI. The service keeps the engine (and the recording)
         // alive on its own if it has promoted itself to the foreground.
         viewModel.detachEngine()

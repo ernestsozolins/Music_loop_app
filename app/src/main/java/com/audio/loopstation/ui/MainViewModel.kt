@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.audio.loopstation.AudioEngine
 import com.audio.loopstation.StemExporter
 import com.audio.loopstation.data.LoopStationDatabase
+import com.audio.loopstation.data.SessionEntity
 import com.audio.loopstation.data.SessionRepository
 import com.audio.loopstation.data.TrackEntity
 import java.io.File
@@ -16,9 +17,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -67,14 +70,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val engineState: AudioEngine.State = AudioEngine.State.IDLE,
         val isRecording: Boolean = false,
         val isPlaying: Boolean = false,
+        val isCountingIn: Boolean = false,
+        val hasLoop: Boolean = false,
         val loopLengthFrames: Int = 0,
         val metronomeOn: Boolean = false,
+        val countIn: Boolean = true,
+        val quantize: Boolean = true,
         val bpm: Int = 120,
         val beatsPerMeasure: Int = 4,
         val beatInBar: Int = 0,
         val exporting: Boolean = false,
+        val saving: Boolean = false,
         val engineReady: Boolean = false,  // streams running (mic permission granted)
-    )
+    ) {
+        /** Label for the on-screen smart loop button (pedal-free workflow). */
+        val loopButtonLabel: String = when {
+            isCountingIn -> "Count-in…"
+            engineState == AudioEngine.State.RECORDING_MASTER -> "Recording — tap to close"
+            engineState == AudioEngine.State.OVERDUBBING -> "Overdubbing — tap to end"
+            !hasLoop -> "Record loop"
+            else -> "Overdub"
+        }
+    }
 
     private val exporter = StemExporter(application)
     private val repository = SessionRepository(LoopStationDatabase.get(application))
@@ -219,7 +236,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         for (t in _tracks.value) {
-            engine.setTrackGain(t.index, t.volume)
+            engine.setTrackGain(t.index, faderToGain(t.volume))
             engine.setTrackPan(t.index, t.pan)
         }
         updateAndApplyMutes { it }  // pushes the effective mute/solo matrix
@@ -233,6 +250,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     suspend fun saveSession(name: String? = null): Boolean {
         val engine = this.engine ?: return false
+        _transport.update { it.copy(saving = true) }
+        try {
+            return doSaveSession(engine, name)
+        } finally {
+            _transport.update { it.copy(saving = false) }
+        }
+    }
+
+    private suspend fun doSaveSession(engine: AudioEngine, name: String?): Boolean {
         if (!engine.flushAndCloseSession()) return false
 
         val t = _transport.value
@@ -294,6 +320,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     state == AudioEngine.State.OVERDUBBING,
                 isPlaying = state == AudioEngine.State.PLAYING ||
                     state == AudioEngine.State.OVERDUBBING,
+                isCountingIn = state == AudioEngine.State.COUNT_IN,
+                hasLoop = loopLen > 0,
                 loopLengthFrames = loopLen,
                 metronomeOn = m.metronomeActive,
                 beatInBar = m.beatInBar,
@@ -485,7 +513,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onVolumeChange(index: Int, volume: Float) {
         val v = volume.coerceIn(0f, 1f)
-        engine?.setTrackGain(index, v) ?: return
+        engine?.setTrackGain(index, faderToGain(v)) ?: return  // dB taper, not linear
         _tracks.update { list -> list.map { if (it.index == index) it.copy(volume = v) else it } }
     }
 
@@ -513,6 +541,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val v = size.coerceIn(0f, 1f)
         engine?.setReverbRoomSize(v) ?: return
         _reverb.update { it.copy(roomSize = v) }
+    }
+
+    // ------------------------------------------------------------------
+    // Metronome workflow toggles + smart loop button
+    // ------------------------------------------------------------------
+
+    fun onCountInToggle() {
+        val on = !_transport.value.countIn
+        engine?.setCountInEnabled(on) ?: return
+        _transport.update { it.copy(countIn = on) }
+    }
+
+    fun onQuantizeToggle() {
+        val on = !_transport.value.quantize
+        engine?.setLoopQuantize(on) ?: return
+        _transport.update { it.copy(quantize = on) }
+    }
+
+    /**
+     * On-screen equivalent of the Enter pedal — the whole tablet-without-a-
+     * pedal workflow on one big button: record the master, close it, start
+     * an overdub, or end a pass and advance. Delegates to [onOverdubPedal].
+     */
+    fun onSmartLoopButton() = onOverdubPedal()
+
+    // ------------------------------------------------------------------
+    // dB-calibrated fader taper
+    // ------------------------------------------------------------------
+
+    /**
+     * Maps a 0..1 fader position to linear gain on a dB curve: hard 0 at the
+     * bottom, unity (0 dB) at [UNITY_FADER], up to +6 dB at the top. Far more
+     * usable than a linear slider, where unity would sit at 1.0 and the whole
+     * useful range bunches near the top.
+     */
+    private fun faderToGain(position: Float): Float {
+        if (position <= 0f) return 0f
+        // Piecewise dB: below unity spans MIN_DB..0, above spans 0..MAX_DB.
+        val decibels = if (position >= UNITY_FADER) {
+            (position - UNITY_FADER) / (1f - UNITY_FADER) * MAX_DB
+        } else {
+            (UNITY_FADER - position) / UNITY_FADER * MIN_DB
+        }
+        return Math.pow(10.0, decibels / 20.0).toFloat()
+    }
+
+    /** dB readout for a fader position (for the UI label). */
+    fun faderDb(position: Float): Float = when {
+        position <= 0f -> Float.NEGATIVE_INFINITY
+        position >= UNITY_FADER -> (position - UNITY_FADER) / (1f - UNITY_FADER) * MAX_DB
+        else -> (UNITY_FADER - position) / UNITY_FADER * MIN_DB
     }
 
     private inline fun updateAndApplyMutes(transform: (TrackUiState) -> TrackUiState) {
@@ -546,8 +625,78 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         detachEngine()
     }
 
+    // ------------------------------------------------------------------
+    // Autosave + session browser
+    // ------------------------------------------------------------------
+
+    /** Sessions for the browser sheet; recomposes on every save (Room Flow). */
+    val sessions: StateFlow<List<SessionEntity>> =
+        repository.observeSessions()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+
+    private var autosaving = false
+
+    /**
+     * Persist the current session if there's anything to save and we're not
+     * mid-recording. Called on app background (Activity.onStop) and after
+     * the transport settles, so work is never lost. Debounced by a flag so
+     * overlapping saves can't stack.
+     */
+    fun autosaveIfNeeded() {
+        val engine = this.engine ?: return
+        if (autosaving) return
+        if (_transport.value.isRecording || _transport.value.isCountingIn) return
+        if (engine.trackContentMask and 0xFFFF == 0) return  // nothing recorded
+        autosaving = true
+        // Capture `engine` explicitly: this is called from Activity.onStop
+        // right before detachEngine() nulls the field, and doSaveSession uses
+        // the captured reference (the engine object outlives the UI in the
+        // service). viewModelScope survives backgrounding (it's cancelled only
+        // at onCleared), and the foreground service keeps the process alive.
+        viewModelScope.launch {
+            try {
+                doSaveSession(engine, null)
+            } finally {
+                autosaving = false
+            }
+        }
+    }
+
+    /**
+     * Loads a saved session into the (fresh) engine: clears the current
+     * loop, applies tempo + mix, and streams the stems back. Refuses while
+     * recording. Returns true on success.
+     */
+    suspend fun loadSession(sessionId: Long): Boolean {
+        val engine = this.engine ?: return false
+        if (_transport.value.isRecording) return false
+        val saved = repository.sessionWithTracks(sessionId) ?: return false
+        engine.resetLoopForRestore()  // immediate reset (no slow buffer wipe)
+        delay(40)  // let the reset command drain before restoring
+        currentSessionId = saved.session.id
+        _transport.update {
+            it.copy(bpm = saved.session.bpm, beatsPerMeasure = saved.session.timeSignature)
+        }
+        engine.setMetronomeState(false, saved.session.bpm.toFloat(), saved.session.timeSignature)
+        applySavedTrackStates(engine, saved.tracks)
+        val paths = saved.tracks
+            .filter { File(it.filePath).exists() }
+            .associate { it.trackIndex to it.filePath }
+        return if (paths.isNotEmpty()) engine.restoreSession(paths) else true
+    }
+
+    fun deleteSession(session: SessionEntity) {
+        viewModelScope.launch { repository.deleteSession(session) }
+    }
+
     companion object {
         const val MIN_BPM = 40
         const val MAX_BPM = 240
+
+        // dB fader taper: unity (0 dB) sits at this fader position; below maps
+        // to MIN_DB..0, above to 0..MAX_DB.
+        private const val UNITY_FADER = 0.8f
+        private const val MIN_DB = -48f
+        private const val MAX_DB = 6f
     }
 }
