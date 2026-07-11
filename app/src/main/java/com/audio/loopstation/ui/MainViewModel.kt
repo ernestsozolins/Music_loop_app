@@ -6,9 +6,12 @@ import androidx.lifecycle.viewModelScope
 import com.audio.loopstation.AudioEngine
 import com.audio.loopstation.StemExporter
 import java.io.File
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -18,6 +21,13 @@ import kotlinx.coroutines.launch
  * [transport], [tracks], and [waveform]; every user gesture funnels through
  * an intent method here, which forwards to the native engine's lock-free
  * control surface and updates the flows.
+ *
+ * OWNERSHIP: the engine belongs to [com.audio.loopstation.MediaRecordingService],
+ * not to this ViewModel. MainActivity binds to the service and calls
+ * [attachEngine]/[detachEngine] as the connection comes and goes, so the UI
+ * (and this ViewModel) can be destroyed and recreated freely without ever
+ * touching the C++ audio thread. The service also owns the meter polling —
+ * this class only collects the resulting StateFlow.
  *
  * Data flows IN from the engine on two paths:
  *  - the 60 Hz meter poll (transport position, engine state, beat flash,
@@ -57,34 +67,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val engineReady: Boolean = false,  // streams running (mic permission granted)
     )
 
-    private val engine: AudioEngine = AudioEngine.create(application)
     private val exporter = StemExporter(application)
+
+    private var engine: AudioEngine? = null
+    private var metersJob: Job? = null
+    private var eventsJob: Job? = null
 
     private val _transport = MutableStateFlow(TransportUiState())
     val transport: StateFlow<TransportUiState> = _transport.asStateFlow()
 
-    private val _tracks = MutableStateFlow(
-        List(engine.trackCount) { i -> TrackUiState(index = i, name = "Track ${i + 1}", isSelected = i == 0) }
-    )
+    private val _tracks = MutableStateFlow(emptyList<TrackUiState>())
     val tracks: StateFlow<List<TrackUiState>> = _tracks.asStateFlow()
 
     private val _waveform = MutableStateFlow(FloatArray(0))
     val waveform: StateFlow<FloatArray> = _waveform.asStateFlow()
 
     /** Device disconnect / restart notifications for snackbars. */
-    val engineEvents: SharedFlow<AudioEngine.EngineEvent> = engine.events
+    private val _engineEvents = MutableSharedFlow<AudioEngine.EngineEvent>(extraBufferCapacity = 16)
+    val engineEvents: SharedFlow<AudioEngine.EngineEvent> = _engineEvents.asSharedFlow()
 
-    init {
-        engine.startMeterPolling(viewModelScope)
-        viewModelScope.launch { engine.meters.collect(::onMeters) }
+    // ------------------------------------------------------------------
+    // Service connection (MainActivity's ServiceConnection calls these)
+    // ------------------------------------------------------------------
+
+    /** Start observing the service-owned engine. Idempotent per instance. */
+    fun attachEngine(engine: AudioEngine) {
+        if (this.engine === engine) return
+        detachEngine()
+        this.engine = engine
+        // This ViewModel survives configuration changes, so an existing
+        // track list (the user's volume/pan/mute UI state) is kept; it is
+        // only rebuilt when we meet a different engine (fresh process).
+        if (_tracks.value.size != engine.trackCount) {
+            _tracks.value = List(engine.trackCount) { i ->
+                TrackUiState(index = i, name = "Track ${i + 1}", isSelected = i == 0)
+            }
+        }
+        metersJob = viewModelScope.launch { engine.meters.collect(::onMeters) }
+        eventsJob = viewModelScope.launch { engine.events.collect { _engineEvents.emit(it) } }
     }
 
-    /** Called by MainActivity once RECORD_AUDIO is granted. */
-    fun onAudioPermissionGranted() {
-        if (!_transport.value.engineReady) {
-            val started = engine.start()
-            _transport.update { it.copy(engineReady = started) }
-        }
+    /** Stop observing. NEVER releases the engine — the service owns it. */
+    fun detachEngine() {
+        metersJob?.cancel()
+        metersJob = null
+        eventsJob?.cancel()
+        eventsJob = null
+        engine = null
+    }
+
+    /** Result of MediaRecordingService.ensureEngineStarted(), from the Activity. */
+    fun onEngineReady(ready: Boolean) {
+        _transport.update { it.copy(engineReady = ready) }
     }
 
     // ------------------------------------------------------------------
@@ -92,6 +126,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ------------------------------------------------------------------
 
     private fun onMeters(m: AudioEngine.MeterUiState) {
+        val engine = this.engine ?: return
         _waveform.value = m.waveform
         val latest = m.latest
         val state = latest?.state ?: _transport.value.engineState
@@ -129,20 +164,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ------------------------------------------------------------------
 
     fun onRecordTap() {
+        val engine = this.engine ?: return
         if (_transport.value.isRecording) engine.stopRecording() else engine.startRecording()
     }
 
-    fun onPlayTap() = engine.startPlayback()
+    fun onPlayTap() {
+        engine?.startPlayback()
+    }
 
-    fun onStopTap() = engine.stopPlayback()
+    fun onStopTap() {
+        engine?.stopPlayback()
+    }
 
     fun onMetronomeToggle() {
+        val engine = this.engine ?: return
         val t = _transport.value
         engine.setMetronomeState(!t.metronomeOn, t.bpm.toFloat(), t.beatsPerMeasure)
         _transport.update { it.copy(metronomeOn = !t.metronomeOn) }
     }
 
     fun onBpmChange(delta: Int) {
+        val engine = this.engine ?: return
         val t = _transport.value
         val bpm = (t.bpm + delta).coerceIn(MIN_BPM, MAX_BPM)
         // Lock-free hand-off; the engine applies it at the next beat boundary.
@@ -155,7 +197,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ------------------------------------------------------------------
 
     fun onTrackSelect(index: Int) {
-        engine.selectTrack(index)
+        engine?.selectTrack(index) ?: return
         _tracks.update { list -> list.map { it.copy(isSelected = it.index == index) } }
     }
 
@@ -169,19 +211,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onVolumeChange(index: Int, volume: Float) {
         val v = volume.coerceIn(0f, 1f)
-        engine.setTrackGain(index, v)
+        engine?.setTrackGain(index, v) ?: return
         _tracks.update { list -> list.map { if (it.index == index) it.copy(volume = v) else it } }
     }
 
     fun onPanChange(index: Int, pan: Float) {
         val p = pan.coerceIn(-1f, 1f)
-        engine.setTrackPan(index, p)
+        engine?.setTrackPan(index, p) ?: return
         _tracks.update { list -> list.map { if (it.index == index) it.copy(pan = p) else it } }
     }
 
-    fun onClearTrack(index: Int) = engine.clearTrack(index)
+    fun onClearTrack(index: Int) {
+        engine?.clearTrack(index)
+    }
 
     private inline fun updateAndApplyMutes(transform: (TrackUiState) -> TrackUiState) {
+        val engine = this.engine ?: return
         val list = _tracks.value.map(transform)
         _tracks.value = list
         val anySolo = list.any { it.soloed }
@@ -196,6 +241,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Finalizes + zips the session; the caller shares the returned file. */
     suspend fun exportSession(): File? {
+        val engine = this.engine ?: return null
         _transport.update { it.copy(exporting = true) }
         return try {
             exporter.exportSessionZip(engine)
@@ -205,7 +251,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
-        engine.release()
+        // Deliberately does NOT release the engine: MediaRecordingService
+        // owns its lifecycle and may be recording long after this UI died.
+        detachEngine()
     }
 
     companion object {

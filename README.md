@@ -66,6 +66,15 @@ USB mic ──> input stream callback ──> SpscSampleRing ──┐   (drift-
       mic-permission flow. Engine gained per-track balance pan and a packed
       track-content mask for one-call polling; solo is a ViewModel-side
       mute matrix.
+- [x] **Phase 4.8 — Foreground service & system lifecycles**
+      (`MediaRecordingService.kt`): the service owns the engine (and its
+      meter polling); the UI binds in onStart/unbinds in onStop and the
+      ViewModel attaches/detaches — UI death never touches the audio thread.
+      Foreground promotion (microphone type, ongoing notification with Stop
+      action) while the transport runs or loops are held in memory; audio
+      focus (AUDIOFOCUS_GAIN) with call-safe loss handling: transport
+      parked, take finalized on disk, streams released to telephony, and
+      playback-only resume on focus return.
 - [ ] **Phase 5 — Build wiring & polish**: Gradle project (Compose + Oboe
       Prefab + NDK), per-track offline waveforms, window-size-class layout
       variants, persistence (session save/restore, mixdown render).
