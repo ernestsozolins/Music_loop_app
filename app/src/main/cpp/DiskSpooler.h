@@ -101,12 +101,18 @@ class DiskSpooler {
   // Adds up to `frames` of every playing stream (with its gain) into `dst`.
   void mixStreams(float* dst, int32_t frames);
 
-  // ----- Export helper (any NON-realtime thread; synchronous) -----
+  // ----- Export/restore helpers (any NON-realtime thread; synchronous) -----
   // Writes an interleaved float buffer to a IEEE-float32 .wav (format tag 3)
   // at `path`, RIFF/fact/data sizes patched on close. Used by the engine's
   // stem-export worker. Returns frames written (-1 if the file failed to
   // open, short count on a write error).
   int64_t writeWavFile(const std::string& path, const float* interleaved, int64_t frames);
+
+  // Reads an entire .wav into `dest` (interleaved engine channel layout,
+  // float32/PCM16 sources converted, up to maxFrames). The file must match
+  // the engine sample rate. Used by the engine's session-restore worker.
+  // Returns frames read, or -1 on open/format/rate failure.
+  int64_t readWavFile(const std::string& path, float* dest, int64_t maxFrames);
 
  private:
   struct WriterCommand {

@@ -226,6 +226,28 @@ class AudioEngine {
   int32_t exportState() const { return mExportState.load(std::memory_order_acquire); }
   int32_t exportedStemCount() const { return mExportedStems.load(std::memory_order_relaxed); }
 
+  // ----- Session restore (control thread; asynchronous) -----
+  // Loads saved stem .wav files back into the loop tracks — the inverse of
+  // exportStems(), used by the persistence layer at startup. A worker
+  // thread reads each file into its track buffer (safe: the tracks carry no
+  // content yet and every transport command is frozen meanwhile); the loop
+  // length + hasContent flags are then committed ON THE AUDIO THREAD via a
+  // RestoreCommit command, so the looper state machine never races the
+  // loader. The commit lands with the first audio callback, so completion
+  // requires the engine to be started. Preconditions: no existing loop,
+  // transport Idle/Stopped, no export/calibration running. Poll
+  // restoreState().
+  struct RestoreFile {
+    int32_t track = 0;
+    std::string path;
+  };
+  static constexpr int32_t kRestoreIdle = 0;
+  static constexpr int32_t kRestoreRunning = 1;
+  static constexpr int32_t kRestoreDone = 2;
+  static constexpr int32_t kRestoreFailed = 3;
+  bool restoreSession(std::vector<RestoreFile> files);
+  int32_t restoreState() const { return mRestoreState.load(std::memory_order_acquire); }
+
   // ----- Parameters (control thread; plain atomic stores) -----
   void selectTrack(int32_t track);              // target for the next record/overdub
   void setTrackGain(int32_t track, float gain); // 0..4
@@ -281,6 +303,7 @@ class AudioEngine {
     ClearTrack,
     CalibrateStart,
     CalibrateCancel,
+    RestoreCommit,  // audio thread adopts the loop the restore worker loaded
   };
   struct Command {
     CommandType type;
@@ -409,6 +432,20 @@ class AudioEngine {
   std::atomic<bool> mExportActive{false};
   std::atomic<int32_t> mExportState{kExportIdle};
   std::atomic<int32_t> mExportedStems{0};
+
+  // Session-restore worker (writes loop-track buffers; audio thread freezes
+  // ALL transport commands while mRestoreActive, then adopts the result via
+  // RestoreCommit). mRestoreMask/mRestoreLoopLen are written by the worker
+  // before the commit command is pushed and read by the audio thread after
+  // popping it — ordered by the command queue's release/acquire pair.
+  void restoreThreadMain();
+  std::mutex mRestoreMutex;  // guards mRestoreThread spawn/join
+  std::thread mRestoreThread;
+  std::vector<RestoreFile> mRestoreFiles;  // set before spawn, worker-only after
+  std::atomic<bool> mRestoreActive{false};
+  std::atomic<int32_t> mRestoreState{kRestoreIdle};
+  uint32_t mRestoreMask = 0;
+  int32_t mRestoreLoopLen = 0;
 
   // Event push to the JNI layer (error thread -> Kotlin).
   std::mutex mEventMutex;

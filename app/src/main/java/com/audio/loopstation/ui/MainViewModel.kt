@@ -5,7 +5,11 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.audio.loopstation.AudioEngine
 import com.audio.loopstation.StemExporter
+import com.audio.loopstation.data.LoopStationDatabase
+import com.audio.loopstation.data.SessionRepository
+import com.audio.loopstation.data.TrackEntity
 import java.io.File
+import java.util.Locale
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -68,10 +72,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     private val exporter = StemExporter(application)
+    private val repository = SessionRepository(LoopStationDatabase.get(application))
 
     private var engine: AudioEngine? = null
     private var metersJob: Job? = null
     private var eventsJob: Job? = null
+
+    /** Room id of the session being edited; null until first save/restore. */
+    private var currentSessionId: Long? = null
+    private var restoreAttempted = false
 
     private val _transport = MutableStateFlow(TransportUiState())
     val transport: StateFlow<TransportUiState> = _transport.asStateFlow()
@@ -105,6 +114,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         metersJob = viewModelScope.launch { engine.meters.collect(::onMeters) }
         eventsJob = viewModelScope.launch { engine.events.collect { _engineEvents.emit(it) } }
+        maybeRestoreLastSession()
     }
 
     /** Stop observing. NEVER releases the engine — the service owns it. */
@@ -119,7 +129,112 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Result of MediaRecordingService.ensureEngineStarted(), from the Activity. */
     fun onEngineReady(ready: Boolean) {
         _transport.update { it.copy(engineReady = ready) }
+        // The restore commit lands on the audio thread, so it can only
+        // complete once the streams run — try again if attach came first.
+        if (ready) maybeRestoreLastSession()
     }
+
+    // ------------------------------------------------------------------
+    // Session persistence
+    // ------------------------------------------------------------------
+
+    /**
+     * Loads the last active session once per process: mix parameters flow
+     * to the engine through the same JNI setters the sliders use, then the
+     * stem files stream back into the C++ loop tracks on the engine's
+     * restore worker. Runs only against a fresh engine (the native side
+     * refuses to clobber a live loop).
+     */
+    private fun maybeRestoreLastSession() {
+        val engine = this.engine ?: return
+        if (restoreAttempted || !_transport.value.engineReady) return
+        restoreAttempted = true
+        viewModelScope.launch {
+            val saved = repository.latestSessionWithTracks() ?: return@launch
+            currentSessionId = saved.session.id
+
+            // 1. Session-level state: tempo + meter (metronome stays off
+            //    until the user arms it; the tempo is preloaded lock-free).
+            _transport.update {
+                it.copy(bpm = saved.session.bpm, beatsPerMeasure = saved.session.timeSignature)
+            }
+            engine.setMetronomeState(
+                false, saved.session.bpm.toFloat(), saved.session.timeSignature,
+            )
+
+            // 2. Per-track mix state -> UI flows + engine (gain/pan/mutes).
+            applySavedTrackStates(engine, saved.tracks)
+
+            // 3. Audio: stems back into the loop tracks (native worker). On
+            //    failure the mix parameters above still stand and the UI
+            //    simply shows empty tracks — the stems on disk are untouched.
+            val paths = saved.tracks
+                .filter { File(it.filePath).exists() }
+                .associate { it.trackIndex to it.filePath }
+            if (paths.isNotEmpty()) engine.restoreSession(paths)
+        }
+    }
+
+    private fun applySavedTrackStates(engine: AudioEngine, saved: List<TrackEntity>) {
+        val byIndex = saved.associateBy { it.trackIndex }
+        _tracks.update { list ->
+            list.map { t ->
+                byIndex[t.index]?.let { s ->
+                    t.copy(volume = s.volume, pan = s.pan, muted = s.isMuted, soloed = s.isSoloed)
+                } ?: t
+            }
+        }
+        for (t in _tracks.value) {
+            engine.setTrackGain(t.index, t.volume)
+            engine.setTrackPan(t.index, t.pan)
+        }
+        updateAndApplyMutes { it }  // pushes the effective mute/solo matrix
+    }
+
+    /**
+     * Persists the whole session: finalize spooled audio, re-export one
+     * stem per track into this session's directory, then commit metadata +
+     * track list to Room in one transaction. The Stop/onStop UI wiring
+     * calls this; it is also safe to invoke from a future "Save" button.
+     */
+    suspend fun saveSession(name: String? = null): Boolean {
+        val engine = this.engine ?: return false
+        if (!engine.flushAndCloseSession()) return false
+
+        val t = _transport.value
+        val id = repository.ensureSessionId(
+            existingId = currentSessionId,
+            name = name ?: defaultSessionName(),
+            bpm = t.bpm,
+            timeSignature = t.beatsPerMeasure,
+        )
+        currentSessionId = id
+
+        val dir = File(getApplication<Application>().filesDir, "sessions/$id").apply { mkdirs() }
+        engine.exportStems(dir.absolutePath) ?: return false
+
+        // Snapshot only tracks whose stem actually landed on disk.
+        val snapshots = _tracks.value.mapNotNull { track ->
+            val stem = File(dir, String.format(Locale.US, "track_%02d.wav", track.index + 1))
+            if (track.hasContent && stem.exists()) {
+                SessionRepository.TrackSnapshot(
+                    trackIndex = track.index,
+                    filePath = stem.absolutePath,
+                    volume = track.volume,
+                    pan = track.pan,
+                    isMuted = track.muted,
+                    isSoloed = track.soloed,
+                )
+            } else {
+                null
+            }
+        }
+        repository.commitSessionState(id, name, t.bpm, t.beatsPerMeasure, snapshots)
+        return true
+    }
+
+    private fun defaultSessionName(): String =
+        "Session ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(java.util.Date())}"
 
     // ------------------------------------------------------------------
     // Engine -> UI (60 Hz)

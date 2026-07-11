@@ -295,6 +295,33 @@ class AudioEngine private constructor(private var handle: Long) {
         }
 
     /**
+     * Loads saved stem .wavs back into the loop tracks — the inverse of
+     * [exportStems], driven by the persistence layer at startup. [trackPaths]
+     * maps engine track index to an absolute .wav path (48 kHz). The native
+     * worker fills the buffers and the audio thread adopts loop length +
+     * content flags, so completion requires the engine to be started; the
+     * transport is frozen until the commit lands. Requires a fresh engine
+     * (no loop yet). Returns true once the loop is live.
+     */
+    suspend fun restoreSession(trackPaths: Map<Int, String>, timeoutMs: Long = 30_000): Boolean {
+        val h = handle
+        if (h == 0L || trackPaths.isEmpty()) return false
+        val entries = trackPaths.entries.toList()
+        val indices = IntArray(entries.size) { entries[it].key }
+        val paths = Array(entries.size) { entries[it].value }
+        if (!nativeRestoreSession(h, indices, paths)) return false
+        val finalState = withTimeoutOrNull(timeoutMs) {
+            var state = nativeGetRestoreState(h)
+            while (state == RESTORE_RUNNING) {
+                delay(16)
+                state = nativeGetRestoreState(h)
+            }
+            state
+        } ?: return false
+        return finalState == RESTORE_DONE
+    }
+
+    /**
      * Writes one IEEE-float32 .wav per non-empty loop track into
      * [directory] (created by the caller) on the engine's export worker.
      * Requires the transport to be quiet (playing is fine; recording or
@@ -433,6 +460,10 @@ class AudioEngine private constructor(private var handle: Long) {
         private const val EXPORT_RUNNING = 1
         private const val EXPORT_DONE = 2
 
+        /** AudioEngine::kRestore* values. */
+        private const val RESTORE_RUNNING = 1
+        private const val RESTORE_DONE = 2
+
         /**
          * Allocates a capture file in app-private storage — no runtime
          * storage permission needed. Pass the returned absolute path to
@@ -531,6 +562,12 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeExportStems(handle: Long, directory: String): Boolean
     private external fun nativeGetExportState(handle: Long): Int
     private external fun nativeGetExportedStemCount(handle: Long): Int
+    private external fun nativeRestoreSession(
+        handle: Long,
+        trackIndices: IntArray,
+        paths: Array<String>,
+    ): Boolean
+    private external fun nativeGetRestoreState(handle: Long): Int
 
     private external fun nativeOpenBackingTrack(handle: Long, slot: Int, path: String, loop: Boolean)
     private external fun nativePlayBackingTrack(handle: Long, slot: Int)

@@ -409,6 +409,27 @@ int64_t DiskSpooler::writeWavFile(const std::string& path, const float* interlea
   return done;
 }
 
+int64_t DiskSpooler::readWavFile(const std::string& path, float* dest, int64_t maxFrames) {
+  WavReader reader;
+  if (!reader.open(path)) {
+    LOGW("restore: failed to open/parse %s", path.c_str());
+    return -1;
+  }
+  if (reader.rate != mSampleRate) {
+    LOGW("restore: %s is %d Hz, engine runs %d Hz", path.c_str(), reader.rate, mSampleRate);
+    return -1;
+  }
+  int64_t done = 0;
+  while (done < maxFrames) {
+    const int32_t want =
+        static_cast<int32_t>(std::min<int64_t>(kStreamChunkFrames, maxFrames - done));
+    const int32_t got = reader.readFrames(dest + done * mChannels, want, mChannels);
+    if (got <= 0) break;
+    done += got;
+  }
+  return done;
+}
+
 // ---------------------------------------------------------------------------
 // DiskWriter thread — the ONLY place capture-file I/O happens
 // ---------------------------------------------------------------------------

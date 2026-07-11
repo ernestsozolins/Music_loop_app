@@ -89,6 +89,10 @@ AudioEngine::~AudioEngine() {
     std::lock_guard<std::mutex> lock(mExportMutex);
     if (mExportThread.joinable()) mExportThread.join();
   }
+  {
+    std::lock_guard<std::mutex> lock(mRestoreMutex);
+    if (mRestoreThread.joinable()) mRestoreThread.join();
+  }
   mSpooler.stop();  // then finalize any open files and join the worker threads
 }
 
@@ -357,6 +361,7 @@ bool AudioEngine::flushAndCloseSession(int32_t timeoutMillis) {
 bool AudioEngine::exportStems(const std::string& directory) {
   std::lock_guard<std::mutex> lock(mExportMutex);
   if (mExportState.load(std::memory_order_acquire) == kExportRunning) return false;
+  if (mRestoreState.load(std::memory_order_acquire) == kRestoreRunning) return false;
   if (mExportThread.joinable()) mExportThread.join();  // reap the previous run
   mExportDir = directory;
   mExportedStems.store(0, std::memory_order_relaxed);
@@ -407,6 +412,77 @@ void AudioEngine::exportThreadMain() {
   LOGI("stem export finished: %d stem(s), loopLen=%d", written, loopLen);
   mExportActive.store(false, std::memory_order_release);
   mExportState.store(ok ? kExportDone : kExportFailed, std::memory_order_release);
+}
+
+bool AudioEngine::restoreSession(std::vector<RestoreFile> files) {
+  std::lock_guard<std::mutex> lock(mRestoreMutex);
+  if (files.empty()) return false;
+  if (mRestoreState.load(std::memory_order_acquire) == kRestoreRunning) return false;
+  if (mExportState.load(std::memory_order_acquire) == kExportRunning) return false;
+  if (mRestoreThread.joinable()) mRestoreThread.join();  // reap the previous run
+  mRestoreFiles = std::move(files);
+  // Freeze the whole transport before the worker touches any track buffer;
+  // preconditions are re-checked on the worker after a grace window.
+  mRestoreActive.store(true, std::memory_order_release);
+  mRestoreState.store(kRestoreRunning, std::memory_order_release);
+  mRestoreThread = std::thread([this] { restoreThreadMain(); });
+  return true;
+}
+
+void AudioEngine::restoreThreadMain() {
+  // Longer than one audio callback: any command already past the freeze has
+  // been applied, so the state we read below is settled.
+  std::this_thread::sleep_for(std::chrono::milliseconds(25));
+
+  const EngineState st = mState.load(std::memory_order_acquire);
+  bool blocked = (st != EngineState::Idle && st != EngineState::Stopped) ||
+                 mLoopLengthFrames.load(std::memory_order_acquire) != 0 ||  // never clobber a live loop
+                 mExportActive.load(std::memory_order_acquire) || mCalibrator.active();
+  for (const RestoreFile& f : mRestoreFiles) {
+    if (f.track >= 0 && f.track < mConfig.trackCount) {
+      blocked = blocked || mTracks[f.track].clearing.load(std::memory_order_acquire) ||
+                mTracks[f.track].hasContent.load(std::memory_order_acquire);
+    }
+  }
+  if (blocked) {
+    LOGW("session restore refused: engine is not in a fresh, quiet state");
+    mRestoreActive.store(false, std::memory_order_release);
+    mRestoreState.store(kRestoreFailed, std::memory_order_release);
+    return;
+  }
+
+  // Load each stem into its (content-free, unreadable-by-the-mixer) buffer.
+  int32_t loopLen = 0;
+  uint32_t mask = 0;
+  for (const RestoreFile& f : mRestoreFiles) {
+    if (f.track < 0 || f.track >= mConfig.trackCount) continue;
+    const int64_t frames =
+        mSpooler.readWavFile(f.path, mTracks[f.track].data.data(), mMaxLoopFrames);
+    if (frames <= 0) {
+      LOGW("restore: skipping track %d (%s)", f.track, f.path.c_str());
+      continue;
+    }
+    // Stems of one session share a length; tolerate small mismatches by
+    // taking the shortest so every playing track has valid data.
+    loopLen = (loopLen == 0) ? static_cast<int32_t>(frames)
+                             : std::min(loopLen, static_cast<int32_t>(frames));
+    mask |= 1u << f.track;
+  }
+
+  if (mask == 0 || loopLen <= 0) {
+    mRestoreActive.store(false, std::memory_order_release);
+    mRestoreState.store(kRestoreFailed, std::memory_order_release);
+    return;
+  }
+
+  // Hand the result to the audio thread: it adopts loop length + content
+  // flags atomically with respect to the state machine. The freeze lifts
+  // there, and Done is reported there.
+  mRestoreMask = mask;
+  mRestoreLoopLen = loopLen;
+  pushCommand({CommandType::RestoreCommit, 0});
+  LOGI("restore: %d frames staged across mask 0x%x, awaiting audio-thread commit",
+       loopLen, mask);
 }
 
 void AudioEngine::clearTrack(int32_t track) {
@@ -674,6 +750,13 @@ void AudioEngine::applyCommand(const Command& cmd) {
   // While calibrating, the transport is frozen: only a cancel gets through.
   if (mCalibrator.active() && cmd.type != CommandType::CalibrateCancel) return;
 
+  // While the restore worker fills track buffers, EVERYTHING except its own
+  // commit is frozen — no arming, clearing, or playback over half-loaded data.
+  if (mRestoreActive.load(std::memory_order_acquire) &&
+      cmd.type != CommandType::RestoreCommit) {
+    return;
+  }
+
   // While the export worker reads the track buffers, anything that would
   // write them (record-arm, clear) is refused; playback/stop still work.
   if (mExportActive.load(std::memory_order_acquire) &&
@@ -760,6 +843,22 @@ void AudioEngine::applyCommand(const Command& cmd) {
     }
     case CommandType::CalibrateCancel: {
       mCalibrator.cancel();
+      break;
+    }
+    case CommandType::RestoreCommit: {
+      // Adopt the loop the restore worker staged (mRestoreMask/mRestoreLoopLen
+      // are ordered by the command queue's release/acquire pair).
+      setLoopLength(mRestoreLoopLen);
+      setPlayhead(0);
+      for (int32_t t = 0; t < mConfig.trackCount; ++t) {
+        if (mRestoreMask & (1u << t)) {
+          mTracks[t].hasContent.store(true, std::memory_order_relaxed);
+        }
+      }
+      mState.store(mRestoreLoopLen > 0 ? EngineState::Stopped : EngineState::Idle,
+                   std::memory_order_relaxed);  // loop ready; user presses play
+      mRestoreActive.store(false, std::memory_order_release);
+      mRestoreState.store(kRestoreDone, std::memory_order_release);
       break;
     }
   }

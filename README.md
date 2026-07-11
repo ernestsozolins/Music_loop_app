@@ -75,9 +75,18 @@ USB mic ──> input stream callback ──> SpscSampleRing ──┐   (drift-
       focus (AUDIOFOCUS_GAIN) with call-safe loss handling: transport
       parked, take finalized on disk, streams released to telephony, and
       playback-only resume on focus return.
-- [ ] **Phase 5 — Build wiring & polish**: Gradle project (Compose + Oboe
-      Prefab + NDK), per-track offline waveforms, window-size-class layout
-      variants, persistence (session save/restore, mixdown render).
+- [x] **Phase 5 — Session persistence (Room)** (`data/`): SessionEntity +
+      TrackEntity (FK, cascade) with Flow-based DAO queries and a
+      SessionRepository owning the two-step save protocol (row first for the
+      stem directory, then stems, then an atomic metadata+tracks commit).
+      Engine gained the inverse of stem export — `restoreSession()` loads
+      saved .wavs back into the loop tracks on a worker thread and commits
+      loop length/content flags on the audio thread. MainViewModel restores
+      the last active session on startup (mix params via the JNI setters,
+      audio via the restore worker) and exposes `saveSession()`.
+- [ ] **Phase 6 — Build wiring & polish**: Gradle project (Compose + Room +
+      Oboe Prefab + NDK), per-track offline waveforms, window-size-class
+      layout variants, mixdown render, session browser UI.
 
 ## Engine configuration
 

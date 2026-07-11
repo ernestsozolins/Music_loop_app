@@ -376,6 +376,38 @@ JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetExportedS
   return engine != nullptr ? engine->exportedStemCount() : 0;
 }
 
+// Starts the asynchronous session restore: parallel arrays of track slots
+// and stem .wav paths (from the Room persistence layer). The worker loads
+// the buffers; the audio thread adopts loop length + content flags via
+// RestoreCommit. Poll nativeGetRestoreState.
+JNIEXPORT jboolean JNICALL Java_com_audio_loopstation_AudioEngine_nativeRestoreSession(
+    JNIEnv* env, jobject, jlong handle, jintArray trackIndices, jobjectArray paths) {
+  AudioEngine* engine = fromHandle(handle);
+  if (engine == nullptr || trackIndices == nullptr || paths == nullptr) return JNI_FALSE;
+  const jsize count =
+      std::min(env->GetArrayLength(trackIndices), env->GetArrayLength(paths));
+  if (count <= 0) return JNI_FALSE;
+
+  jint* indices = env->GetIntArrayElements(trackIndices, nullptr);
+  if (indices == nullptr) return JNI_FALSE;
+  std::vector<AudioEngine::RestoreFile> files;
+  files.reserve(static_cast<size_t>(count));
+  for (jsize i = 0; i < count; ++i) {
+    auto path = static_cast<jstring>(env->GetObjectArrayElement(paths, i));
+    files.push_back({indices[i], toStdString(env, path)});
+    env->DeleteLocalRef(path);
+  }
+  env->ReleaseIntArrayElements(trackIndices, indices, JNI_ABORT);
+  return engine->restoreSession(std::move(files)) ? JNI_TRUE : JNI_FALSE;
+}
+
+// AudioEngine::kRestore*: 0 idle, 1 running, 2 done, 3 failed.
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetRestoreState(
+    JNIEnv*, jobject, jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->restoreState() : 0;
+}
+
 // ---------------------------------------------------------------------------
 // Parameters
 // ---------------------------------------------------------------------------
