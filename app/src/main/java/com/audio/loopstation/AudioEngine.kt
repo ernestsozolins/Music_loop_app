@@ -81,7 +81,7 @@ class AudioEngine private constructor(private var handle: Long) {
 
     /** Mirrors looper::EngineState — keep the order in sync with AudioEngine.h. */
     enum class State {
-        IDLE, RECORDING_MASTER, PLAYING, OVERDUBBING, STOPPED;
+        IDLE, RECORDING_MASTER, PLAYING, OVERDUBBING, STOPPED, COUNT_IN;
 
         companion object {
             fun fromNative(ordinal: Int): State = entries.getOrElse(ordinal) { IDLE }
@@ -221,6 +221,27 @@ class AudioEngine private constructor(private var handle: Long) {
         if (handle != 0L) nativeSetMetronomeSync(handle, enabled)
     }
 
+    /** With the click on, master recording starts at the next downbeat (default ON). */
+    fun setCountInEnabled(enabled: Boolean) {
+        if (handle != 0L) nativeSetCountInEnabled(handle, enabled)
+    }
+
+    /** With the click on, the master loop length is rounded to whole bars (default ON). */
+    fun setLoopQuantize(enabled: Boolean) {
+        if (handle != 0L) nativeSetLoopQuantize(handle, enabled)
+    }
+
+    /**
+     * Multichannel input mapping for interfaces like a 4-channel H2n mode:
+     * request [channels] capture channels (0 = engine default) and feed the
+     * engine's L/R from source channels [mapLeft]/[mapRight] (same index
+     * twice = mono). The channel count takes effect at the next engine
+     * start; the map indices apply live.
+     */
+    fun setInputChannels(channels: Int, mapLeft: Int, mapRight: Int) {
+        if (handle != 0L) nativeSetInputChannels(handle, channels, mapLeft, mapRight)
+    }
+
     // ------------------------------------------------------------------
     // Output monitoring reverb (Freeverb tank in C++). Applied ONLY to
     // the headphone/speaker mix — takes, loop tracks, and exported stems
@@ -274,8 +295,9 @@ class AudioEngine private constructor(private var handle: Long) {
 
     /**
      * Loads a .wav into a streaming slot (0 until [BACKING_STREAM_SLOTS]).
-     * Requirements: 48 kHz, mono or stereo, 16-bit PCM or 32-bit float.
-     * Asynchronous: poll [backingTrackState] for READY or ERROR.
+     * Mono or stereo, 16-bit PCM or 32-bit float, any sample rate (files
+     * that differ from the engine rate are linearly resampled on the reader
+     * thread). Asynchronous: poll [backingTrackState] for READY or ERROR.
      */
     fun openBackingTrack(slot: Int, path: String, loop: Boolean = false) {
         if (handle != 0L) nativeOpenBackingTrack(handle, slot, path, loop)
@@ -613,6 +635,9 @@ class AudioEngine private constructor(private var handle: Long) {
     )
     private external fun nativeSetMetronomeGain(handle: Long, gain: Float)
     private external fun nativeSetMetronomeSync(handle: Long, enabled: Boolean)
+    private external fun nativeSetCountInEnabled(handle: Long, enabled: Boolean)
+    private external fun nativeSetLoopQuantize(handle: Long, enabled: Boolean)
+    private external fun nativeSetInputChannels(handle: Long, channels: Int, mapLeft: Int, mapRight: Int)
     private external fun nativeGetBeatInfo(handle: Long): Long
 
     private external fun nativeSetReverbRoomSize(handle: Long, size: Float)

@@ -73,6 +73,21 @@ class Metronome {
   uint32_t beatCount() const { return mBeatCountAtomic.load(std::memory_order_relaxed); }
   int32_t beatInBar() const { return mBeatInBarAtomic.load(std::memory_order_relaxed); }
 
+  // Current sanitized tempo (any thread) — used by the engine for
+  // bar-quantized loop lengths and count-in scheduling.
+  void tempo(float& bpmOut, int32_t& beatsOut) const {
+    const uint64_t ctrl = mControl.load(std::memory_order_relaxed);
+    uint32_t bpmBits = static_cast<uint32_t>(ctrl >> 32);
+    float bpm = 0.0f;
+    std::memcpy(&bpm, &bpmBits, sizeof(bpm));
+    if (!(bpm >= kMinBpm && bpm <= kMaxBpm)) bpm = 120.0f;
+    int32_t beats = static_cast<int32_t>((ctrl >> 8) & 0xFFu);
+    if (beats < 1) beats = 1;
+    if (beats > kMaxBeatsPerMeasure) beats = kMaxBeatsPerMeasure;
+    bpmOut = bpm;
+    beatsOut = beats;
+  }
+
   // AUDIO THREAD ONLY. Mixes the click into `out` (interleaved,
   // channelCount channels, `frames` frames). Output-path exclusive — see
   // the routing note in the file header.

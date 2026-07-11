@@ -135,11 +135,19 @@ struct WavReader {
   uint16_t format = 0;
   uint16_t bits = 0;
   int32_t channels = 0;
-  int32_t rate = 0;
+  int32_t rate = 0;          // source sample rate
+  int32_t engineRate = 0;    // 0 = no resampling; else output rate
   int64_t dataOffset = 0;
-  int64_t frames = 0;
-  int64_t pos = 0;
+  int64_t srcFrames = 0;     // source-rate frame count
+  int64_t frames = 0;        // OUTPUT-rate frame count (== srcFrames if no resample)
+  int64_t pos = 0;           // source frames read
+  int64_t outPos = 0;        // output frames produced
   std::vector<uint8_t> raw;
+
+  // Linear-resampler state (only used when resampling()).
+  double frac = 0.0;         // position between curFrame and nextFrame, [0,1)
+  float curL = 0.0f, curR = 0.0f, nextL = 0.0f, nextR = 0.0f;
+  bool primed = false;
 
   ~WavReader() { close(); }
 
@@ -150,9 +158,12 @@ struct WavReader {
     }
   }
 
+  bool resampling() const { return engineRate > 0 && rate != engineRate; }
   int32_t bytesPerFrame() const { return channels * (bits / 8); }
 
-  bool open(const std::string& path) {
+  // engineOutputRate: 0 keeps the file's native rate (bit-exact path, used by
+  // restore where our own stems always match); nonzero resamples to it.
+  bool open(const std::string& path, int32_t engineOutputRate = 0) {
     close();
     file = std::fopen(path.c_str(), "rb");
     if (file == nullptr) return false;
@@ -201,52 +212,111 @@ struct WavReader {
     const int64_t available = fileEnd - dataOffset;
     if (dataBytes == 0 || dataBytes > available) dataBytes = available;
 
-    frames = dataBytes / bytesPerFrame();
+    engineRate = engineOutputRate;
+    srcFrames = dataBytes / bytesPerFrame();
+    frames = resampling()
+                 ? (srcFrames * static_cast<int64_t>(engineRate) + rate / 2) / rate
+                 : srcFrames;
     return seekToFrame(0);
   }
 
-  bool seekToFrame(int64_t frame) {
+  bool seekToFrame(int64_t outFrame) {
     if (file == nullptr) return false;
-    if (std::fseek(file, static_cast<long>(dataOffset + frame * bytesPerFrame()), SEEK_SET) != 0) {
+    const int64_t srcFrame =
+        resampling() ? outFrame * rate / engineRate : outFrame;
+    if (std::fseek(file, static_cast<long>(dataOffset + srcFrame * bytesPerFrame()), SEEK_SET) !=
+        0) {
       return false;
     }
-    pos = frame;
+    pos = srcFrame;
+    outPos = outFrame;
+    frac = 0.0;
+    primed = false;
     return true;
   }
 
-  // Reads up to maxFrames, converting to float and to dstChannels (1 or 2).
+  // Reads one source frame into (l, r); returns false at EOF.
+  bool readSource(float& l, float& r) {
+    uint8_t buf[2 * sizeof(float)];  // max bytesPerFrame for <=2ch/32-bit
+    if (std::fread(buf, static_cast<size_t>(bytesPerFrame()), 1, file) != 1) return false;
+    ++pos;
+    if (format == 3) {
+      const float* s = reinterpret_cast<const float*>(buf);
+      l = s[0];
+      r = (channels == 2) ? s[1] : s[0];
+    } else {
+      const int16_t* s = reinterpret_cast<const int16_t*>(buf);
+      l = static_cast<float>(s[0]) / 32768.0f;
+      r = static_cast<float>((channels == 2) ? s[1] : s[0]) / 32768.0f;
+    }
+    return true;
+  }
+
+  static void emit(float* dst, int32_t f, int32_t dstChannels, float l, float r) {
+    if (dstChannels == 1) {
+      dst[f] = 0.5f * (l + r);
+    } else {
+      dst[f * 2] = l;
+      dst[f * 2 + 1] = r;
+    }
+  }
+
+  // Reads up to maxFrames of OUTPUT (engine-rate) audio, converting format,
+  // channels, and — when the source rate differs — sample rate (linear).
   int32_t readFrames(float* dst, int32_t maxFrames, int32_t dstChannels) {
     if (file == nullptr || maxFrames <= 0) return 0;
-    const int64_t remain = frames - pos;
-    const int32_t want = static_cast<int32_t>(std::min<int64_t>(maxFrames, remain));
-    if (want <= 0) return 0;
 
-    const size_t needBytes = static_cast<size_t>(want) * bytesPerFrame();
-    if (raw.size() < needBytes) raw.resize(needBytes);  // reader thread: allocation is fine
-
-    const int32_t got = static_cast<int32_t>(
-        std::fread(raw.data(), static_cast<size_t>(bytesPerFrame()), static_cast<size_t>(want), file));
-    pos += got;
-
-    for (int32_t f = 0; f < got; ++f) {
-      float left, right;
-      if (format == 3) {
-        const float* s = reinterpret_cast<const float*>(raw.data()) + f * channels;
-        left = s[0];
-        right = (channels == 2) ? s[1] : s[0];
-      } else {
-        const int16_t* s = reinterpret_cast<const int16_t*>(raw.data()) + f * channels;
-        left = static_cast<float>(s[0]) / 32768.0f;
-        right = static_cast<float>((channels == 2) ? s[1] : s[0]) / 32768.0f;
+    if (!resampling()) {
+      // Bit-exact fast path: bulk read + convert, no interpolation.
+      const int64_t remain = frames - pos;
+      const int32_t want = static_cast<int32_t>(std::min<int64_t>(maxFrames, remain));
+      if (want <= 0) return 0;
+      const size_t needBytes = static_cast<size_t>(want) * bytesPerFrame();
+      if (raw.size() < needBytes) raw.resize(needBytes);
+      const int32_t got = static_cast<int32_t>(std::fread(
+          raw.data(), static_cast<size_t>(bytesPerFrame()), static_cast<size_t>(want), file));
+      pos += got;
+      outPos += got;
+      for (int32_t f = 0; f < got; ++f) {
+        float l, r;
+        if (format == 3) {
+          const float* s = reinterpret_cast<const float*>(raw.data()) + f * channels;
+          l = s[0];
+          r = (channels == 2) ? s[1] : s[0];
+        } else {
+          const int16_t* s = reinterpret_cast<const int16_t*>(raw.data()) + f * channels;
+          l = static_cast<float>(s[0]) / 32768.0f;
+          r = static_cast<float>((channels == 2) ? s[1] : s[0]) / 32768.0f;
+        }
+        emit(dst, f, dstChannels, l, r);
       }
-      if (dstChannels == 1) {
-        dst[f] = 0.5f * (left + right);
-      } else {
-        dst[f * 2] = left;
-        dst[f * 2 + 1] = right;
+      return got;
+    }
+
+    // Linear-interpolating resample path. `step` source frames per output.
+    const double step = static_cast<double>(rate) / static_cast<double>(engineRate);
+    if (!primed) {
+      if (!readSource(curL, curR)) return 0;
+      if (!readSource(nextL, nextR)) { nextL = curL; nextR = curR; }
+      frac = 0.0;
+      primed = true;
+    }
+    int32_t produced = 0;
+    while (produced < maxFrames && outPos < frames) {
+      const float l = curL + (nextL - curL) * static_cast<float>(frac);
+      const float r = curR + (nextR - curR) * static_cast<float>(frac);
+      emit(dst, produced, dstChannels, l, r);
+      ++produced;
+      ++outPos;
+      frac += step;
+      while (frac >= 1.0) {
+        frac -= 1.0;
+        curL = nextL;
+        curR = nextR;
+        if (!readSource(nextL, nextR)) { nextL = curL; nextR = curR; }
       }
     }
-    return got;
+    return produced;
   }
 };
 
@@ -539,14 +609,19 @@ void DiskSpooler::readerHandleCommand(const ReaderCommand& cmd) {
       slot.ring.reset();
       delete slot.reader;
       slot.reader = new WavReader();
-      if (!slot.reader->open(cmd.path) || slot.reader->rate != mSampleRate) {
-        LOGW("backing track rejected (missing/bad format/rate!=%d): %s", mSampleRate,
-             cmd.path.c_str());
+      // Pass the engine rate so mismatched files (e.g. 44.1 kHz) are
+      // linearly resampled on this worker thread instead of rejected.
+      if (!slot.reader->open(cmd.path, mSampleRate)) {
+        LOGW("backing track rejected (missing/bad format): %s", cmd.path.c_str());
         delete slot.reader;
         slot.reader = nullptr;
         slot.length.store(0, std::memory_order_relaxed);
         slot.state.store(StreamState::Error, std::memory_order_release);
         return;
+      }
+      if (slot.reader->resampling()) {
+        LOGI("backing track slot=%d resampling %d->%d Hz", cmd.slot, slot.reader->rate,
+             mSampleRate);
       }
       slot.loop = cmd.loop;
       slot.eof = false;

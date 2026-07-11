@@ -272,6 +272,23 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetMetronome
   }
 }
 
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetCountInEnabled(
+    JNIEnv*, jobject, jlong handle, jboolean enabled) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setCountInEnabled(enabled == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetLoopQuantize(
+    JNIEnv*, jobject, jlong handle, jboolean enabled) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setLoopQuantize(enabled == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetInputChannels(
+    JNIEnv*, jobject, jlong handle, jint channels, jint mapLeft, jint mapRight) {
+  if (AudioEngine* engine = fromHandle(handle)) {
+    engine->setInputChannels(channels, mapLeft, mapRight);
+  }
+}
+
 // Packed beat info for the UI flash: bit 7 = active, bits 0..6 = beat-in-bar,
 // bits 8+ = monotonic beat count. Must match AudioEngine.kt decoding.
 JNIEXPORT jlong JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetBeatInfo(JNIEnv*, jobject,

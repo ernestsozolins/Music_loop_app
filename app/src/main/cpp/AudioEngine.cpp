@@ -66,6 +66,9 @@ AudioEngine::AudioEngine(const Config& config) : mConfig(config) {
   mInputRing.allocate(mLookAheadFrames + mDriftSlackFrames + 4 * kMaxCallbackFrames,
                       mConfig.channelCount);
   mInputScratch.assign(static_cast<size_t>(kMaxCallbackFrames) * mConfig.channelCount, 0.0f);
+  // Sized for the widest input the callback may hand us before remapping to
+  // the engine's channel count (a 4-channel interface into a stereo engine).
+  mInputRemapScratch.assign(static_cast<size_t>(kMaxCallbackFrames) * 8, 0.0f);
   for (int32_t t = 0; t < mConfig.trackCount; ++t) {
     mTracks[t].data.assign(static_cast<size_t>(mMaxLoopFrames) * mConfig.channelCount, 0.0f);
   }
@@ -75,6 +78,8 @@ AudioEngine::AudioEngine(const Config& config) : mConfig(config) {
   mMetronome.configure(mConfig.sampleRate, mConfig.channelCount);
   mCalibrator.configure(mConfig.sampleRate, mConfig.channelCount);
   mReverb.configure(mConfig.sampleRate, mConfig.channelCount);
+  mLimiter.configure(mConfig.sampleRate, mConfig.channelCount);
+  mInputMapR.store(mConfig.channelCount > 1 ? 1 : 0, std::memory_order_relaxed);
 
   // The spooler's worker threads live for the engine's whole lifetime; the
   // audio callbacks only ever touch its lock-free rings, so starting the
@@ -190,14 +195,21 @@ oboe::Result AudioEngine::openStreams() {
   // Double-buffer the output for the standard latency/stability trade-off.
   mOutputStream->setBufferSizeInFrames(mOutputStream->getFramesPerBurst() * 2);
 
+  // Multichannel request: when the user picks a wider capture (e.g. a
+  // 4-channel H2n mode) we open that many channels and remap to the engine's
+  // stereo path ourselves in onInputReady, so channel conversion must be OFF.
+  const int32_t requestedInCh =
+      mInputRequestChannels > 0 ? mInputRequestChannels : mConfig.channelCount;
+  const bool customChannelMap = requestedInCh != mConfig.channelCount;
+
   oboe::AudioStreamBuilder inBuilder;
   inBuilder.setDirection(oboe::Direction::Input)
       ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
       ->setSharingMode(oboe::SharingMode::Shared)
       ->setFormat(oboe::AudioFormat::Float)
       ->setFormatConversionAllowed(true)
-      ->setChannelCount(mConfig.channelCount)
-      ->setChannelConversionAllowed(true)
+      ->setChannelCount(requestedInCh)
+      ->setChannelConversionAllowed(!customChannelMap)
       ->setSampleRate(mConfig.sampleRate)
       ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium)
       // No AGC / noise suppression / echo cancellation in the capture path —
@@ -208,10 +220,20 @@ oboe::Result AudioEngine::openStreams() {
       ->setErrorCallback(mInputCallback);
 
   result = inBuilder.openStream(mInputStream);
+  if (result != oboe::Result::OK && customChannelMap) {
+    // The device could not supply the requested channel count: fall back to
+    // the engine channel count with conversion on.
+    LOGW("multichannel input (%d ch) unavailable, falling back to %d", requestedInCh,
+         mConfig.channelCount);
+    inBuilder.setChannelCount(mConfig.channelCount)->setChannelConversionAllowed(true);
+    result = inBuilder.openStream(mInputStream);
+  }
   if (result != oboe::Result::OK) {
     LOGW("failed to open input stream: %s", oboe::convertToText(result));
     return result;
   }
+  // What the input callback will actually receive (used by the remap).
+  mInputOpenedChannels = mInputStream->getChannelCount();
 
   // With SRC pinned above, both streams must present the engine rate; if a
   // platform ever refuses, fail loudly rather than run misaligned frame math.
@@ -569,6 +591,17 @@ void AudioEngine::selectTrack(int32_t track) {
   mSelectedTrack.store(track, std::memory_order_relaxed);
 }
 
+void AudioEngine::setInputChannels(int32_t channels, int32_t mapLeft, int32_t mapRight) {
+  // The map indices are lock-free and apply live; the channel COUNT needs a
+  // stream reopen, so latch it under the lifecycle lock for the next start().
+  mInputMapL.store(std::max(0, mapLeft), std::memory_order_relaxed);
+  mInputMapR.store(std::max(0, mapRight), std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lock(mLifecycleMutex);
+    mInputRequestChannels = std::max(0, std::min(channels, 8));
+  }
+}
+
 void AudioEngine::setTrackGain(int32_t track, float gain) {
   if (track < 0 || track >= mConfig.trackCount) return;
   mTracks[track].gain.store(clampf(gain, 0.0f, 4.0f), std::memory_order_relaxed);
@@ -636,10 +669,30 @@ int32_t AudioEngine::framesPerBurst() const {
 // ---------------------------------------------------------------------------
 
 oboe::DataCallbackResult AudioEngine::onInputReady(const float* audioData, int32_t numFrames) {
-  // Deliberately minimal: one bulk copy into the lock-free ring. All
-  // analysis and mixing happens on the output callback so the meters stay
-  // time-aligned with what actually reaches the loop and the speakers.
-  const int32_t written = mInputRing.writeFrames(audioData, numFrames);
+  // Deliberately minimal: (optional) channel remap, then one bulk copy into
+  // the lock-free ring. All analysis and mixing happens on the output
+  // callback so the meters stay time-aligned with what actually reaches the
+  // loop and the speakers.
+  const float* frames = audioData;
+  const int32_t srcCh = mInputOpenedChannels;
+  if (srcCh != mConfig.channelCount && numFrames <= kMaxCallbackFrames && srcCh > 0) {
+    // Pull the engine's L/R from the chosen source channels (indices clamped
+    // to what the device actually opened).
+    const int32_t dstCh = mConfig.channelCount;
+    int32_t mapL = mInputMapL.load(std::memory_order_relaxed);
+    int32_t mapR = mInputMapR.load(std::memory_order_relaxed);
+    if (mapL >= srcCh) mapL = 0;
+    if (mapR >= srcCh) mapR = srcCh - 1;
+    float* dst = mInputRemapScratch.data();
+    for (int32_t f = 0; f < numFrames; ++f) {
+      const float* s = audioData + static_cast<size_t>(f) * srcCh;
+      float* d = dst + static_cast<size_t>(f) * dstCh;
+      d[0] = s[mapL];
+      if (dstCh == 2) d[1] = s[mapR];
+    }
+    frames = dst;
+  }
+  const int32_t written = mInputRing.writeFrames(frames, numFrames);
   if (written < numFrames) {
     mInputOverflowFrames.fetch_add(numFrames - written, std::memory_order_relaxed);
   }
@@ -672,6 +725,9 @@ oboe::DataCallbackResult AudioEngine::onOutputReady(float* audioData, int32_t nu
     // an overdub needs. Looper/monitor/backing/metronome are all suppressed
     // so nothing competes with the ping.
     mCalibrator.process(audioData, mInputScratch.data(), numFrames, mAbsOutFrame);
+    // Route the ping through the limiter too, so its look-ahead delay is part
+    // of the measured round trip (overdubs pass through the same limiter).
+    mLimiter.process(audioData, numFrames);
     if (!mCalibrator.active() &&
         mCalibrator.state() == LatencyCalibrator::State::Succeeded) {
       // Apply immediately: overdubs are now written this many frames behind
@@ -731,8 +787,14 @@ oboe::DataCallbackResult AudioEngine::onOutputReady(float* audioData, int32_t nu
   mMetronome.render(audioData, numFrames, locked ? playheadAtBlockStart : -1,
                     locked ? loopLenAtBlockStart : 0);
 
-  // Hard safety clamp on the final mix (loops + monitor + backing +
-  // metronome); a proper look-ahead limiter is a later-phase item.
+  // Look-ahead master limiter on the monitoring mix (loops + monitor +
+  // backing + metronome). Transparent gain reduction replaces hard clipping
+  // when stacked loops get loud; still output-path only, so recordings stay
+  // dry. Its 5 ms latency is captured by the calibration ping (which also
+  // passes through here).
+  mLimiter.process(audioData, numFrames);
+
+  // Final safety clamp catches the limiter's sub-dB overshoot only.
   const int32_t samples = numFrames * mConfig.channelCount;
   for (int32_t i = 0; i < samples; ++i) audioData[i] = clampf(audioData[i], -1.0f, 1.0f);
 
@@ -851,8 +913,10 @@ void AudioEngine::applyCommand(const Command& cmd) {
 
   switch (cmd.type) {
     case CommandType::ToggleRecord: {
-      if (st == EngineState::RecordingMaster) {
-        finalizeMasterLoop();
+      if (st == EngineState::CountIn) {
+        mState.store(EngineState::Idle, std::memory_order_relaxed);  // cancel count-in
+      } else if (st == EngineState::RecordingMaster) {
+        finalizeMasterOrQuantize();
       } else if (st == EngineState::Overdubbing) {
         mState.store(EngineState::Playing, std::memory_order_relaxed);
       } else {
@@ -861,15 +925,18 @@ void AudioEngine::applyCommand(const Command& cmd) {
       break;
     }
     case CommandType::RecordStart: {
-      // Idempotent: ignored if a recording/overdub pass is already running.
-      if (st != EngineState::RecordingMaster && st != EngineState::Overdubbing) {
+      // Idempotent: ignored if a pass (or its count-in) is already running.
+      if (st != EngineState::RecordingMaster && st != EngineState::Overdubbing &&
+          st != EngineState::CountIn) {
         armRecording(st);
       }
       break;
     }
     case CommandType::RecordStop: {
-      if (st == EngineState::RecordingMaster) {
-        finalizeMasterLoop();
+      if (st == EngineState::CountIn) {
+        mState.store(EngineState::Idle, std::memory_order_relaxed);  // cancel count-in
+      } else if (st == EngineState::RecordingMaster) {
+        finalizeMasterOrQuantize();
       } else if (st == EngineState::Overdubbing) {
         mState.store(EngineState::Playing, std::memory_order_relaxed);
       }
@@ -883,9 +950,10 @@ void AudioEngine::applyCommand(const Command& cmd) {
       break;
     }
     case CommandType::Stop: {
-      if (st == EngineState::RecordingMaster) {
+      if (st == EngineState::RecordingMaster || st == EngineState::CountIn) {
         // Cancel the take; nothing usable was committed.
         mMasterRecordPos = 0;
+        mMasterStopAt = 0;
         setPlayhead(0);
         mState.store(EngineState::Idle, std::memory_order_relaxed);
       } else {
@@ -899,6 +967,7 @@ void AudioEngine::applyCommand(const Command& cmd) {
       setLoopLength(0);
       setPlayhead(0);
       mMasterRecordPos = 0;
+      mMasterStopAt = 0;
       for (int32_t t = 0; t < mConfig.trackCount; ++t) {
         mTracks[t].hasContent.store(false, std::memory_order_relaxed);
         beginTrackClear(mTracks[t]);
@@ -977,13 +1046,50 @@ void AudioEngine::armRecording(EngineState current) {
   if (mLoopLen == 0) {
     // No master loop yet — this recording defines the loop length.
     mMasterRecordPos = 0;
+    mMasterStopAt = 0;
     setPlayhead(0);
-    mState.store(EngineState::RecordingMaster, std::memory_order_relaxed);
+    if (mCountInEnabled.load(std::memory_order_relaxed) && mMetronome.isActive()) {
+      // Wait for the next downbeat before capturing, so the loop starts on
+      // the bar. The intervening clicks are the count-in.
+      mCountInStartBeat = mMetronome.beatCount();
+      mState.store(EngineState::CountIn, std::memory_order_relaxed);
+    } else {
+      mState.store(EngineState::RecordingMaster, std::memory_order_relaxed);
+    }
   } else {
     if (current == EngineState::Stopped) setPlayhead(0);
     t.hasContent.store(true, std::memory_order_relaxed);
     mState.store(EngineState::Overdubbing, std::memory_order_relaxed);
   }
+}
+
+// Whole-bar length in frames at the current tempo, or 0 if the click is off.
+int32_t AudioEngine::barFramesOrZero() const {
+  if (!mMetronome.isActive()) return 0;
+  float bpm = 120.0f;
+  int32_t beats = 4;
+  mMetronome.tempo(bpm, beats);
+  const double beatFrames = static_cast<double>(mConfig.sampleRate) * 60.0 / bpm;
+  return static_cast<int32_t>(beatFrames * beats + 0.5);
+}
+
+// Master-recording stop: bar-round the length when quantization is on.
+// Trims a late stop back to the nearest bar immediately; a short stop keeps
+// recording until the bar line (mMasterStopAt) and finalizes there.
+void AudioEngine::finalizeMasterOrQuantize() {
+  const int32_t barFrames =
+      mQuantizeBars.load(std::memory_order_relaxed) ? barFramesOrZero() : 0;
+  if (barFrames > 0 && mMasterRecordPos > 0) {
+    int32_t bars = (mMasterRecordPos + barFrames / 2) / barFrames;
+    if (bars < 1) bars = 1;
+    const int32_t target = std::min(bars * barFrames, mMaxLoopFrames);
+    if (target > mMasterRecordPos) {
+      mMasterStopAt = target;  // keep recording to the bar line
+      return;
+    }
+    mMasterRecordPos = target;  // trim a late stop back to the bar
+  }
+  finalizeMasterLoop();
 }
 
 void AudioEngine::beginTrackClear(LoopTrack& track) {
@@ -1020,6 +1126,7 @@ void AudioEngine::finalizeMasterLoop() {
     mState.store(EngineState::Idle, std::memory_order_relaxed);
   }
   mMasterRecordPos = 0;
+  mMasterStopAt = 0;
 }
 
 void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
@@ -1032,15 +1139,29 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
 
   const EngineState st = mState.load(std::memory_order_relaxed);
 
-  if (st == EngineState::RecordingMaster) {
+  if (st == EngineState::CountIn) {
+    // Monitoring + click only until the next downbeat. The metronome
+    // renders after this function; its beat state here is from the previous
+    // callback, so recording begins within one callback of the downbeat.
+    if (mMetronome.beatCount() > mCountInStartBeat && mMetronome.beatInBar() == 0) {
+      mMasterRecordPos = 0;
+      setPlayhead(0);
+      mState.store(EngineState::RecordingMaster, std::memory_order_relaxed);
+    }
+  } else if (st == EngineState::RecordingMaster) {
     LoopTrack& rec = mTracks[mOverdubTrack];
-    const int32_t n = std::min(frames, mMaxLoopFrames - mMasterRecordPos);
+    int32_t cap = mMaxLoopFrames;
+    if (mMasterStopAt > 0) cap = std::min(cap, mMasterStopAt);  // scheduled bar-line stop
+    const int32_t n = std::min(frames, cap - mMasterRecordPos);
     std::memcpy(&rec.data[static_cast<size_t>(mMasterRecordPos) * ch], in,
                 static_cast<size_t>(n) * ch * sizeof(float));
     mMasterRecordPos += n;
     // Publish record progress so the UI can show elapsed loop time.
     mPlayheadFrames.store(mMasterRecordPos, std::memory_order_relaxed);
-    if (mMasterRecordPos >= mMaxLoopFrames) {
+    if (mMasterStopAt > 0 && mMasterRecordPos >= mMasterStopAt) {
+      mMasterStopAt = 0;
+      finalizeMasterLoop();  // reached the quantized bar line
+    } else if (mMasterRecordPos >= mMaxLoopFrames) {
       finalizeMasterLoop();  // hit capacity: close the loop automatically
     }
   } else if ((st == EngineState::Playing || st == EngineState::Overdubbing) && mLoopLen > 0) {

@@ -36,6 +36,7 @@
 
 #include "DiskSpooler.h"
 #include "LatencyCalibrator.h"
+#include "Limiter.h"
 #include "LockFreeRing.h"
 #include "Metronome.h"
 #include "Reverb.h"
@@ -77,6 +78,7 @@ enum class EngineState : uint8_t {
   Playing,          // loop playback, input monitored
   Overdubbing,      // loop playback + summing input into the armed track
   Stopped,          // loop retained, transport halted, input still monitored
+  CountIn,          // armed; master recording starts at the next downbeat
 };
 
 // One meter datum per output callback block. The UI drains these at ~60 Hz
@@ -178,6 +180,19 @@ class AudioEngine {
   // against an unquantized loop). While recording the master loop, or when
   // no loop exists, the metronome free-runs regardless.
   void setMetronomeSyncToLoop(bool enabled);
+  // With the metronome active: master recording starts at the next downbeat
+  // (EngineState::CountIn bridges the wait; press record again to cancel).
+  // No effect when the click is off. Default ON.
+  void setCountInEnabled(bool enabled) {
+    mCountInEnabled.store(enabled, std::memory_order_relaxed);
+  }
+  // With the metronome active: the master loop length is rounded to whole
+  // bars — stopping early keeps recording to the bar line, stopping late
+  // trims back to the nearest bar. No effect when the click is off.
+  // Default ON.
+  void setLoopQuantize(bool enabled) {
+    mQuantizeBars.store(enabled, std::memory_order_relaxed);
+  }
   bool metronomeActive() const { return mMetronome.isActive(); }
   uint32_t metronomeBeatCount() const { return mMetronome.beatCount(); }
   int32_t metronomeBeatInBar() const { return mMetronome.beatInBar(); }
@@ -282,6 +297,14 @@ class AudioEngine {
   int32_t trackWaveform(int32_t track, float* bins, int32_t maxBins) const;
 
   // ----- Parameters (control thread; plain atomic stores) -----
+  // ----- Input channel mapping (control thread) -----
+  // For multichannel interfaces (e.g. a 4-channel H2n mode): request
+  // `channels` input channels (0 = engine channel count) and feed the
+  // engine's stereo path from source channels mapLeft/mapRight (pass the
+  // same index twice for a mono source). Takes effect at the next
+  // start()/device restart; the map indices themselves apply live.
+  void setInputChannels(int32_t channels, int32_t mapLeft, int32_t mapRight);
+
   void selectTrack(int32_t track);              // target for the next record/overdub
   void setTrackGain(int32_t track, float gain); // 0..4
   // Balance-law pan for stereo output: center is unity on both channels,
@@ -397,6 +420,8 @@ class AudioEngine {
   void pullInput(float* dst, int32_t frames);
   void renderLooper(float* out, const float* in, int32_t frames);
   void finalizeMasterLoop();
+  void finalizeMasterOrQuantize();  // bar-rounds the loop when the click is on
+  int32_t barFramesOrZero() const;  // whole-bar frames at current tempo, 0 if click off
   void beginTrackClear(LoopTrack& track);
   void publishMeters(const float* in, const float* out, int32_t frames);
   void setLoopLength(int32_t frames);
@@ -451,6 +476,24 @@ class AudioEngine {
 
   // Output-path-only monitoring reverb (never reaches the record path).
   Reverb mReverb;
+
+  // Output-path-only look-ahead master limiter (never reaches the record
+  // path; the calibration ping passes through it so its 5 ms latency is
+  // included in the measured record offset).
+  Limiter mLimiter;
+
+  // Count-in + bar quantization (both gated on the metronome being active).
+  std::atomic<bool> mCountInEnabled{true};
+  std::atomic<bool> mQuantizeBars{true};
+  uint32_t mCountInStartBeat = 0;  // audio thread only
+  int32_t mMasterStopAt = 0;       // audio thread only; 0 = no scheduled stop
+
+  // Input channel mapping for multichannel interfaces.
+  int32_t mInputRequestChannels = 0;  // guarded by mLifecycleMutex; 0 = engine ch
+  int32_t mInputOpenedChannels = 0;   // set in openStreams (callbacks stopped)
+  std::atomic<int32_t> mInputMapL{0};
+  std::atomic<int32_t> mInputMapR{1};
+  std::vector<float> mInputRemapScratch;  // input-callback only
 
   // Disk spooling: capture tee + backing-track streaming (worker threads
   // owned by the spooler; the audio thread only touches its rings).
