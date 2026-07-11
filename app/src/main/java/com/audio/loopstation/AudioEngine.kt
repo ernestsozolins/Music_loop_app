@@ -340,6 +340,50 @@ class AudioEngine private constructor(private var handle: Long) {
         return finalState == RESTORE_DONE
     }
 
+    // ------------------------------------------------------------------
+    // Per-pass undo + offline track waveforms
+    // ------------------------------------------------------------------
+
+    /**
+     * Copies [track]'s current audio into the engine's undo buffer — call
+     * right before starting a pass so Backspace can restore the pre-pass
+     * state. A multi-MB memcpy: call from a background dispatcher.
+     */
+    fun snapshotTrackForUndo(track: Int) {
+        if (handle != 0L) nativeSnapshotTrackForUndo(handle, track)
+    }
+
+    /**
+     * Restores the last snapshot (or wipes the take if the pass started on
+     * an empty track). Returns true if the undo was handled; false when no
+     * snapshot exists (fall back to [clearTrack]). Blocks ~30 ms natively.
+     */
+    suspend fun undoLastPass(): Boolean = withContext(Dispatchers.IO) {
+        val h = handle
+        h != 0L && nativeUndoLastPass(h)
+    }
+
+    /** Track the pending undo snapshot belongs to, -1 if none. */
+    val undoPassTrack: Int
+        get() = if (handle != 0L) nativeGetUndoPassTrack(handle) else -1
+
+    /**
+     * Downsampled |peak| bins of a recorded track's loop audio for the
+     * offline waveform display, or null if the track is empty. A full-track
+     * scan — fetch on content changes, not per frame.
+     */
+    fun trackWaveform(track: Int, bins: Int = 96): FloatArray? {
+        val h = handle
+        if (h == 0L || bins <= 0) return null
+        val out = FloatArray(bins)
+        val n = nativeGetTrackWaveform(h, track, out)
+        return when {
+            n <= 0 -> null
+            n == bins -> out
+            else -> out.copyOf(n)
+        }
+    }
+
     /**
      * Writes one IEEE-float32 .wav per non-empty loop track into
      * [directory] (created by the caller) on the engine's export worker.
@@ -592,6 +636,11 @@ class AudioEngine private constructor(private var handle: Long) {
         paths: Array<String>,
     ): Boolean
     private external fun nativeGetRestoreState(handle: Long): Int
+
+    private external fun nativeSnapshotTrackForUndo(handle: Long, track: Int)
+    private external fun nativeUndoLastPass(handle: Long): Boolean
+    private external fun nativeGetUndoPassTrack(handle: Long): Int
+    private external fun nativeGetTrackWaveform(handle: Long, track: Int, dest: FloatArray): Int
 
     private external fun nativeOpenBackingTrack(handle: Long, slot: Int, path: String, loop: Boolean)
     private external fun nativePlayBackingTrack(handle: Long, slot: Int)

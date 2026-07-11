@@ -435,6 +435,44 @@ JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetRestoreSt
 }
 
 // ---------------------------------------------------------------------------
+// Per-pass undo + offline track waveform
+// ---------------------------------------------------------------------------
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSnapshotTrackForUndo(
+    JNIEnv*, jobject, jlong handle, jint track) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->snapshotTrackForUndo(track);
+}
+
+// BLOCKS ~30 ms while the audio thread releases the track; call from a
+// background dispatcher.
+JNIEXPORT jboolean JNICALL Java_com_audio_loopstation_AudioEngine_nativeUndoLastPass(
+    JNIEnv*, jobject, jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  return (engine != nullptr && engine->undoLastPass()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetUndoPassTrack(
+    JNIEnv*, jobject, jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->undoPassTrack() : -1;
+}
+
+// Fills `dest` with downsampled |peak| bins of the track's loop audio;
+// returns the bin count (0 = empty track / no loop).
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetTrackWaveform(
+    JNIEnv* env, jobject, jlong handle, jint track, jfloatArray dest) {
+  AudioEngine* engine = fromHandle(handle);
+  if (engine == nullptr || dest == nullptr) return 0;
+  constexpr int32_t kMaxWaveformBins = 512;
+  float bins[kMaxWaveformBins];
+  const int32_t maxBins =
+      std::min<int32_t>(kMaxWaveformBins, static_cast<int32_t>(env->GetArrayLength(dest)));
+  const int32_t n = engine->trackWaveform(track, bins, maxBins);
+  if (n > 0) env->SetFloatArrayRegion(dest, 0, n, bins);
+  return n;
+}
+
+// ---------------------------------------------------------------------------
 // Parameters
 // ---------------------------------------------------------------------------
 

@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.StateFlow
 fun TrackRow(
     track: TrackUiState,
     waveform: StateFlow<FloatArray>?,
+    offlineWaveform: FloatArray?,
     onSelect: () -> Unit,
     onMuteToggle: () -> Unit,
     onSoloToggle: () -> Unit,
@@ -75,10 +76,22 @@ fun TrackRow(
                 ToggleChip(label = "S", checked = track.soloed, onToggle = onSoloToggle)
             }
 
-            WaveformVisualizer(
-                waveform = waveform,
-                modifier = Modifier.padding(vertical = 8.dp),
-            )
+            // Selected row: live input meter. Recorded rows: the actual loop
+            // audio (offline peaks). Empty rows: resting line.
+            when {
+                waveform != null -> WaveformVisualizer(
+                    waveform = waveform,
+                    modifier = Modifier.padding(vertical = 8.dp),
+                )
+                offlineWaveform != null -> StaticWaveform(
+                    bins = offlineWaveform,
+                    modifier = Modifier.padding(vertical = 8.dp),
+                )
+                else -> WaveformVisualizer(
+                    waveform = null,
+                    modifier = Modifier.padding(vertical = 8.dp),
+                )
+            }
 
             LabeledSlider(
                 label = "Vol",

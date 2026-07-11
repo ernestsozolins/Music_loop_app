@@ -209,7 +209,9 @@ class MediaRecordingService : Service() {
         // become a *started* service first, then go foreground.
         startService(Intent(this, MediaRecordingService::class.java))
         val notification = buildNotification(text)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        // FOREGROUND_SERVICE_TYPE_MICROPHONE exists since API 30 (R); below
+        // that the 2-arg overload picks the types up from the manifest.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             startForeground(NOTIFICATION_ID, notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {

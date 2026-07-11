@@ -98,10 +98,38 @@ USB mic ──> input stream callback ──> SpscSampleRing ──┐   (drift-
       applied to the headphone mix only — capture tees, the overdub path,
       and stem export are all upstream, so recordings stay 100% dry.
       Lock-free RoomSize / DryWetMix / Damping / Enabled controls via JNI.
-- [ ] **Next — Build wiring & polish**: Gradle project (Compose + Room +
-      Oboe Prefab + NDK), per-track offline waveforms, window-size-class
-      layout variants, mixdown render, session browser UI, reverb controls
-      in the transport UI.
+- [x] **Phase 8 — Build wiring & polish**: full Gradle project (AGP 8.7,
+      Kotlin 2.0 + Compose plugin, Room via KSP, Oboe via Prefab, NDK/CMake,
+      pinned Gradle 8.10.2 wrapper); reverb controls in the UI
+      (`MonitorFxPanel`); per-track offline waveforms (native peak-bin
+      scan + `StaticWaveform`); per-pass undo via native track snapshots
+      (Backspace restores an overdub's previous layers instead of wiping
+      the track); window-size-class two-pane grid on expanded widths.
+
+## Building & installing
+
+Prerequisites: [Android Studio](https://developer.android.com/studio)
+(Ladybug or newer). It installs the matching SDK; accept the prompts for
+**NDK (Side by side)** and **CMake 3.22.1** on first sync (or add them via
+Tools → SDK Manager → SDK Tools).
+
+1. `git clone` this repository and check out this branch.
+2. **File → Open** the repository root in Android Studio and let Gradle
+   sync (first sync downloads Compose/Room/Oboe and builds
+   `liblooperengine.so` via CMake).
+3. On the tablet: **Settings → About device → Software information → tap
+   "Build number" seven times** to unlock Developer options, then enable
+   **Settings → Developer options → USB debugging**.
+4. Connect the tablet by USB (or pair via Developer options → Wireless
+   debugging), accept the RSA fingerprint dialog, pick the device in the
+   toolbar, press **Run ▶**.
+5. First launch: grant **microphone** (and notifications). Plug the USB
+   audio interface into the tablet's USB-C port; Android routes audio to it
+   automatically. Run latency calibration once with headphones near the mic
+   (or a loopback cable), pair the Bluetooth pedal, and play.
+
+CLI alternative: `./gradlew installDebug` with the tablet connected (set
+`sdk.dir` in `local.properties` if `ANDROID_HOME` is unset).
 
 ## Engine configuration
 

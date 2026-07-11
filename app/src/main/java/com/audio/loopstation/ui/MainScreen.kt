@@ -1,9 +1,14 @@
 package com.audio.loopstation.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -21,21 +26,26 @@ import com.audio.loopstation.AudioEngine
 import kotlinx.coroutines.launch
 
 /**
- * Root screen: the multi-track grid scrolls in a LazyColumn while the
- * transport bar stays fixed in the Scaffold's bottomBar. Everything renders
- * from the ViewModel's StateFlows; every gesture calls back into it. The
- * layout is a single adaptive column, comfortable from a Tab S9 Ultra down
- * to a small phone (rows stretch, touch targets stay fixed-size).
+ * Root screen: the track grid scrolls while the transport bar stays fixed
+ * in the Scaffold's bottomBar. Everything renders from the ViewModel's
+ * StateFlows; every gesture calls back into it.
+ *
+ * Adaptive layout: [twoPane] (driven by the window width size class from
+ * MainActivity) switches the track list from a single column (phones,
+ * split-screen) to a two-column grid that puts a Tab S9 Ultra-class canvas
+ * to work; the monitor-FX panel spans the full width in both.
  */
 @Composable
-fun MainScreen(viewModel: MainViewModel) {
+fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     val transport by viewModel.transport.collectAsStateWithLifecycle()
     val tracks by viewModel.tracks.collectAsStateWithLifecycle()
-    // The waveform and playhead flows are deliberately NOT collected here:
-    // they change ~60 times a second, and collecting them in composition
-    // would recompose the whole screen every frame. They are handed down as
-    // flows and only read in the draw phase (WaveformVisualizer /
-    // PlayheadProgressLine).
+    val reverb by viewModel.reverb.collectAsStateWithLifecycle()
+    val trackWaveforms by viewModel.trackWaveforms.collectAsStateWithLifecycle()
+    // The live waveform and playhead flows are deliberately NOT collected
+    // here: they change ~60 times a second, and collecting them in
+    // composition would recompose the whole screen every frame. They are
+    // handed down as flows and only read in the draw phase
+    // (WaveformVisualizer / PlayheadProgressLine).
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -59,6 +69,17 @@ fun MainScreen(viewModel: MainViewModel) {
         }
     }
 
+    val onExportTap: () -> Unit = {
+        scope.launch {
+            val zip = viewModel.exportSession()
+            if (zip != null) {
+                shareSessionZip(context, zip)
+            } else {
+                snackbar.showSnackbar("Export failed — stop recording and try again")
+            }
+        }
+    }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
@@ -70,38 +91,55 @@ fun MainScreen(viewModel: MainViewModel) {
                 onStopTap = viewModel::onStopTap,
                 onMetronomeToggle = viewModel::onMetronomeToggle,
                 onBpmChange = viewModel::onBpmChange,
-                onExportTap = {
-                    scope.launch {
-                        val zip = viewModel.exportSession()
-                        if (zip != null) {
-                            shareSessionZip(context, zip)
-                        } else {
-                            snackbar.showSnackbar("Export failed — stop recording and try again")
-                        }
-                    }
-                },
+                onExportTap = onExportTap,
             )
         },
     ) { innerPadding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            items(tracks, key = { it.index }) { track ->
-                TrackRow(
-                    track = track,
-                    // Live rolling input waveform rides on the selected row;
-                    // the others get the inert resting line.
-                    waveform = if (track.isSelected) viewModel.waveform else null,
-                    onSelect = { viewModel.onTrackSelect(track.index) },
-                    onMuteToggle = { viewModel.onMuteToggle(track.index) },
-                    onSoloToggle = { viewModel.onSoloToggle(track.index) },
-                    onVolumeChange = { viewModel.onVolumeChange(track.index, it) },
-                    onPanChange = { viewModel.onPanChange(track.index, it) },
-                )
+        val trackRow: @Composable (MainViewModel.TrackUiState) -> Unit = { track ->
+            TrackRow(
+                track = track,
+                // Live rolling input waveform rides on the selected row; the
+                // others show their recorded loop audio (offline peaks).
+                waveform = if (track.isSelected) viewModel.waveform else null,
+                offlineWaveform = if (track.isSelected) null else trackWaveforms[track.index],
+                onSelect = { viewModel.onTrackSelect(track.index) },
+                onMuteToggle = { viewModel.onMuteToggle(track.index) },
+                onSoloToggle = { viewModel.onSoloToggle(track.index) },
+                onVolumeChange = { viewModel.onVolumeChange(track.index, it) },
+                onPanChange = { viewModel.onPanChange(track.index, it) },
+            )
+        }
+        val fxPanel: @Composable () -> Unit = {
+            MonitorFxPanel(
+                reverb = reverb,
+                onMixChange = viewModel::onReverbMixChange,
+                onRoomSizeChange = viewModel::onReverbRoomSizeChange,
+            )
+        }
+
+        if (twoPane) {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+                contentPadding = PaddingValues(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(tracks, key = { it.index }) { trackRow(it) }
+                item(key = "fx", span = { GridItemSpan(maxLineSpan) }) { fxPanel() }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+                contentPadding = PaddingValues(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(tracks, key = { it.index }) { trackRow(it) }
+                item(key = "fx") { fxPanel() }
             }
         }
     }

@@ -147,6 +147,40 @@ fun PlayheadProgressLine(
     )
 }
 
+/**
+ * Static (offline) waveform for a recorded track: the same bar styling as
+ * the live visualizer but drawn from a fixed peak-bin array — no flows, no
+ * frame clock, redraws only when [bins] changes.
+ */
+@Composable
+fun StaticWaveform(bins: FloatArray, modifier: Modifier = Modifier) {
+    val barColor = MaterialTheme.colorScheme.secondary
+    val hotColor = MaterialTheme.colorScheme.tertiary
+    Spacer(
+        modifier
+            .fillMaxWidth()
+            .height(DEFAULT_HEIGHT)
+            .drawBehind {
+                val midY = size.height / 2f
+                if (bins.isEmpty()) return@drawBehind
+                val step = size.width / bins.size
+                val strokeWidth = step * 0.7f
+                for (i in bins.indices) {
+                    val v = bins[i].coerceIn(0f, 1f)
+                    val half = sqrt(v) * midY
+                    val x = i * step + step / 2f
+                    drawLine(
+                        color = lerp(barColor, hotColor, v),
+                        start = Offset(x, midY - half),
+                        end = Offset(x, midY + half),
+                        strokeWidth = strokeWidth,
+                        cap = StrokeCap.Round,
+                    )
+                }
+            },
+    )
+}
+
 /** Mutable, non-snapshot scratch array reused across draw passes. */
 private class FloatArrayHolder {
     private var values = FloatArray(0)

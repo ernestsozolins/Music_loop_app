@@ -69,6 +69,8 @@ AudioEngine::AudioEngine(const Config& config) : mConfig(config) {
   for (int32_t t = 0; t < mConfig.trackCount; ++t) {
     mTracks[t].data.assign(static_cast<size_t>(mMaxLoopFrames) * mConfig.channelCount, 0.0f);
   }
+  // One spare track's worth of RAM buys single-level per-pass undo.
+  mUndoBuffer.assign(static_cast<size_t>(mMaxLoopFrames) * mConfig.channelCount, 0.0f);
 
   mMetronome.configure(mConfig.sampleRate, mConfig.channelCount);
   mCalibrator.configure(mConfig.sampleRate, mConfig.channelCount);
@@ -413,6 +415,77 @@ void AudioEngine::exportThreadMain() {
   LOGI("stem export finished: %d stem(s), loopLen=%d", written, loopLen);
   mExportActive.store(false, std::memory_order_release);
   mExportState.store(ok ? kExportDone : kExportFailed, std::memory_order_release);
+}
+
+// ---------------------------------------------------------------------------
+// Per-pass undo (control thread)
+// ---------------------------------------------------------------------------
+
+void AudioEngine::snapshotTrackForUndo(int32_t track) {
+  std::lock_guard<std::mutex> lock(mUndoMutex);
+  if (track < 0 || track >= mConfig.trackCount) return;
+  const int32_t loopLen = mLoopLengthFrames.load(std::memory_order_acquire);
+  const bool hadContent = mTracks[track].hasContent.load(std::memory_order_acquire) && loopLen > 0;
+  if (hadContent) {
+    // Concurrent with audio-thread READS at most (the pass has not started);
+    // reader/reader is race-free.
+    std::memcpy(mUndoBuffer.data(), mTracks[track].data.data(),
+                static_cast<size_t>(loopLen) * mConfig.channelCount * sizeof(float));
+  }
+  mUndoHadContent = hadContent;
+  mUndoLoopLen = loopLen;
+  mUndoTrack.store(track, std::memory_order_release);
+}
+
+bool AudioEngine::undoLastPass() {
+  std::lock_guard<std::mutex> lock(mUndoMutex);
+  const int32_t track = mUndoTrack.load(std::memory_order_acquire);
+  if (track < 0) return false;
+  if (mExportState.load(std::memory_order_acquire) == kExportRunning) return false;
+  mUndoTrack.store(-1, std::memory_order_release);  // one-shot
+
+  // 1. Freeze arming/clearing, silence the track (mixer stops reading it).
+  mUndoActive.store(true, std::memory_order_release);
+  pushCommand({CommandType::UndoMute, track});
+  if (isRunning()) std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+  if (mUndoHadContent && mUndoLoopLen == mLoopLengthFrames.load(std::memory_order_acquire)) {
+    // 2. Rewrite the buffer off the audio thread, then recommit.
+    std::memcpy(mTracks[track].data.data(), mUndoBuffer.data(),
+                static_cast<size_t>(mUndoLoopLen) * mConfig.channelCount * sizeof(float));
+    mUndoActive.store(false, std::memory_order_release);
+    pushCommand({CommandType::UndoCommit, track});
+  } else {
+    // The pass started from an empty track (or the loop changed):
+    // undo = wipe the take.
+    mUndoActive.store(false, std::memory_order_release);
+    pushCommand({CommandType::ClearTrack, track});
+  }
+  LOGI("undo: restored pre-pass state of track %d", track);
+  return true;
+}
+
+int32_t AudioEngine::trackWaveform(int32_t track, float* bins, int32_t maxBins) const {
+  if (track < 0 || track >= mConfig.trackCount || bins == nullptr || maxBins <= 0) return 0;
+  const int32_t loopLen = mLoopLengthFrames.load(std::memory_order_acquire);
+  if (loopLen <= 0 || !mTracks[track].hasContent.load(std::memory_order_acquire)) return 0;
+  const int32_t ch = mConfig.channelCount;
+  const float* data = mTracks[track].data.data();
+  const int32_t binCount = std::min(maxBins, loopLen);
+  for (int32_t b = 0; b < binCount; ++b) {
+    const int64_t from = static_cast<int64_t>(loopLen) * b / binCount;
+    const int64_t to = static_cast<int64_t>(loopLen) * (b + 1) / binCount;
+    float peak = 0.0f;
+    for (int64_t f = from; f < to; ++f) {
+      for (int32_t c = 0; c < ch; ++c) {
+        const float v = data[f * ch + c];
+        const float a = v < 0.0f ? -v : v;
+        if (a > peak) peak = a;
+      }
+    }
+    bins[b] = peak;
+  }
+  return binCount;
 }
 
 bool AudioEngine::restoreSession(std::vector<RestoreFile> files) {
@@ -766,9 +839,11 @@ void AudioEngine::applyCommand(const Command& cmd) {
     return;
   }
 
-  // While the export worker reads the track buffers, anything that would
-  // write them (record-arm, clear) is refused; playback/stop still work.
-  if (mExportActive.load(std::memory_order_acquire) &&
+  // While the export worker reads the track buffers — or the undo restore
+  // rewrites one — anything that would write them (record-arm, clear) is
+  // refused; playback/stop still work.
+  if ((mExportActive.load(std::memory_order_acquire) ||
+       mUndoActive.load(std::memory_order_acquire)) &&
       (cmd.type == CommandType::ToggleRecord || cmd.type == CommandType::RecordStart ||
        cmd.type == CommandType::ClearAll || cmd.type == CommandType::ClearTrack)) {
     return;
@@ -852,6 +927,24 @@ void AudioEngine::applyCommand(const Command& cmd) {
     }
     case CommandType::CalibrateCancel: {
       mCalibrator.cancel();
+      break;
+    }
+    case CommandType::UndoMute: {
+      const int32_t track = clampTrackIndex(cmd.intArg);
+      if (track == mOverdubTrack) {
+        if (st == EngineState::Overdubbing) {
+          mState.store(EngineState::Playing, std::memory_order_relaxed);
+        } else if (st == EngineState::RecordingMaster) {
+          mMasterRecordPos = 0;
+          setPlayhead(0);
+          mState.store(EngineState::Idle, std::memory_order_relaxed);
+        }
+      }
+      mTracks[track].hasContent.store(false, std::memory_order_relaxed);
+      break;
+    }
+    case CommandType::UndoCommit: {
+      mTracks[clampTrackIndex(cmd.intArg)].hasContent.store(true, std::memory_order_relaxed);
       break;
     }
     case CommandType::RestoreCommit: {

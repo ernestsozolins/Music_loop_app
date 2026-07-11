@@ -18,6 +18,9 @@ import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
+import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
+import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.core.content.ContextCompat
 import com.audio.loopstation.ui.MainScreen
 import com.audio.loopstation.ui.MainViewModel
@@ -87,9 +90,17 @@ class MainActivity : ComponentActivity() {
         if (wanted.isNotEmpty()) requestPermissions.launch(wanted.toTypedArray())
 
         setContent {
-            // Dark, stage-friendly Material 3 theme.
+            // Dark, stage-friendly Material 3 theme. Expanded-width windows
+            // (Tab S9 Ultra-class tablets, landscape) get the two-pane grid.
+            @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
+            val windowSizeClass = calculateWindowSizeClass(this)
             MaterialTheme(colorScheme = darkColorScheme()) {
-                Surface { MainScreen(viewModel) }
+                Surface {
+                    MainScreen(
+                        viewModel = viewModel,
+                        twoPane = windowSizeClass.widthSizeClass == WindowWidthSizeClass.Expanded,
+                    )
+                }
             }
         }
     }

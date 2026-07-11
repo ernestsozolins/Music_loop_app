@@ -260,6 +260,27 @@ class AudioEngine {
   bool restoreSession(std::vector<RestoreFile> files);
   int32_t restoreState() const { return mRestoreState.load(std::memory_order_acquire); }
 
+  // ----- Per-pass undo (control thread) -----
+  // snapshotTrackForUndo() copies the armed track's audio BEFORE a pass
+  // starts (safe: until the recording begins the audio thread only reads
+  // that buffer). undoLastPass() then restores the pre-pass audio instead
+  // of wiping the whole track: it silences the track via the command queue,
+  // waits out one callback, copies the snapshot back off the audio thread,
+  // and recommits. One snapshot deep; BLOCKS ~30 ms — call from a
+  // background thread. Returns true if it handled the undo (restored, or
+  // cleared a pass that started from an empty track); false if no snapshot
+  // matched and the caller should fall back to clearTrack().
+  void snapshotTrackForUndo(int32_t track);
+  bool undoLastPass();
+  int32_t undoPassTrack() const { return mUndoTrack.load(std::memory_order_acquire); }
+
+  // ----- Offline track waveform (control/UI thread; display-grade) -----
+  // Downsampled |peak| bins over the track's loop audio. Aligned 32-bit
+  // float loads cannot tear, and a bin mixing pre/post-overdub samples is
+  // acceptable for a picture — this is metering, not audio. Returns bins
+  // written (0 if the track is empty or no loop exists).
+  int32_t trackWaveform(int32_t track, float* bins, int32_t maxBins) const;
+
   // ----- Parameters (control thread; plain atomic stores) -----
   void selectTrack(int32_t track);              // target for the next record/overdub
   void setTrackGain(int32_t track, float gain); // 0..4
@@ -316,6 +337,8 @@ class AudioEngine {
     CalibrateStart,
     CalibrateCancel,
     RestoreCommit,  // audio thread adopts the loop the restore worker loaded
+    UndoMute,       // mixer stops reading a track so undo can rewrite it
+    UndoCommit,     // undo finished rewriting: content is valid again
   };
   struct Command {
     CommandType type;
@@ -461,6 +484,16 @@ class AudioEngine {
   std::atomic<int32_t> mRestoreState{kRestoreIdle};
   uint32_t mRestoreMask = 0;
   int32_t mRestoreLoopLen = 0;
+
+  // Per-pass undo: one spare track buffer (adds one track's worth of RAM)
+  // plus the metadata of the snapshot it holds. mUndoActive freezes
+  // record-arm/clear commands while the restore copy runs.
+  std::mutex mUndoMutex;  // serializes control-side snapshot/undo calls
+  std::vector<float> mUndoBuffer;
+  std::atomic<int32_t> mUndoTrack{-1};
+  std::atomic<bool> mUndoActive{false};
+  bool mUndoHadContent = false;  // guarded by mUndoMutex
+  int32_t mUndoLoopLen = 0;      // guarded by mUndoMutex
 
   // Event push to the JNI layer (error thread -> Kotlin).
   std::mutex mEventMutex;
