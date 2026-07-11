@@ -15,7 +15,6 @@ import androidx.compose.material3.FilledIconToggleButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -26,17 +25,22 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.audio.loopstation.ui.MainViewModel.TransportUiState
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Fixed transport strip (hosted in the Scaffold's bottomBar so it never
  * scrolls away): Record / Play / Stop / metronome toggle, BPM adjuster, and
  * Export. All controls are >= 64 dp touch targets per Material 3 ergonomics
- * for stage use. A thin progress line on top shows the playhead within the
- * loop.
+ * for stage use. A thin playhead line on top moves at 60 fps without
+ * recomposing the bar (see PlayheadProgressLine), and every button drives
+ * the same ViewModel intents the Bluetooth foot pedal does — hardware and
+ * touch can be mixed freely mid-performance (the caption spells out the
+ * pedal mapping).
  */
 @Composable
 fun TransportBar(
     transport: TransportUiState,
+    position: StateFlow<Float>,
     onRecordTap: () -> Unit,
     onPlayTap: () -> Unit,
     onStopTap: () -> Unit,
@@ -47,10 +51,7 @@ fun TransportBar(
 ) {
     Surface(modifier = modifier, tonalElevation = 3.dp) {
         Column {
-            LinearProgressIndicator(
-                progress = { transport.positionFraction },
-                modifier = Modifier.fillMaxWidth(),
-            )
+            PlayheadProgressLine(position = position)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -121,6 +122,14 @@ fun TransportBar(
                     Icon(Icons.Filled.Share, contentDescription = "Export stems")
                 }
             }
+            Text(
+                text = "Pedal:  Space = Play/Stop   •   Enter = Overdub/Next   •   Backspace = Undo",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .padding(bottom = 6.dp),
+            )
         }
     }
 }

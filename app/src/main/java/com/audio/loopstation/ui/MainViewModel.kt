@@ -56,13 +56,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val pan: Float = 0.0f,     // -1..1 balance
     )
 
+    // NOTE: the playhead position deliberately does NOT live here. It
+    // changes every meter tick (~60 Hz); as a field it would defeat this
+    // data class's structural-equality dedup and recompose every collector
+    // each frame. It flows separately through [position] and is only read
+    // in the draw phase (see PlayheadProgressLine).
     data class TransportUiState(
         val engineState: AudioEngine.State = AudioEngine.State.IDLE,
         val isRecording: Boolean = false,
         val isPlaying: Boolean = false,
         val loopLengthFrames: Int = 0,
-        val playheadFrames: Int = 0,
-        val positionFraction: Float = 0f,  // playhead within the loop, 0..1
         val metronomeOn: Boolean = false,
         val bpm: Int = 120,
         val beatsPerMeasure: Int = 4,
@@ -82,6 +85,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var currentSessionId: Long? = null
     private var restoreAttempted = false
 
+    // Pedal/undo bookkeeping: the tracks recorded this session in order
+    // (most recent last), the overdub target when recording started, and
+    // the previous engine state for edge detection. UI-session state only —
+    // it survives configuration changes with this ViewModel but not process
+    // death (a restored session starts with an empty undo history).
+    private val undoStack = ArrayDeque<Int>()
+    private var armedTrack = 0
+    private var suppressNextUndoPush = false
+    private var lastEngineState = AudioEngine.State.IDLE
+
     private val _transport = MutableStateFlow(TransportUiState())
     val transport: StateFlow<TransportUiState> = _transport.asStateFlow()
 
@@ -90,6 +103,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _waveform = MutableStateFlow(FloatArray(0))
     val waveform: StateFlow<FloatArray> = _waveform.asStateFlow()
+
+    /** Playhead within the loop, 0..1, ~60 Hz. Draw-phase consumers only. */
+    private val _position = MutableStateFlow(0f)
+    val position: StateFlow<Float> = _position.asStateFlow()
 
     /** Device disconnect / restart notifications for snackbars. */
     private val _engineEvents = MutableSharedFlow<AudioEngine.EngineEvent>(extraBufferCapacity = 16)
@@ -247,6 +264,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state = latest?.state ?: _transport.value.engineState
         val loopLen = latest?.loopLengthFrames ?: 0
         val playhead = latest?.playheadFrames ?: 0
+
+        // High-rate values go to their dedicated draw-phase flow…
+        _position.value = if (loopLen > 0) playhead.toFloat() / loopLen.toFloat() else 0f
+
+        // …while the transport data class (structural equality => StateFlow
+        // dedup) only emits on real state changes.
         _transport.update {
             it.copy(
                 engineState = state,
@@ -255,10 +278,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isPlaying = state == AudioEngine.State.PLAYING ||
                     state == AudioEngine.State.OVERDUBBING,
                 loopLengthFrames = loopLen,
-                playheadFrames = playhead,
-                positionFraction = if (loopLen > 0) {
-                    playhead.toFloat() / loopLen.toFloat()
-                } else 0f,
                 metronomeOn = m.metronomeActive,
                 beatInBar = m.beatInBar,
             )
@@ -272,6 +291,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+
+        // A recording/overdub pass just ended: remember which track it
+        // landed on so the pedal's Backspace can undo it.
+        val prev = lastEngineState
+        if (prev != state &&
+            (prev == AudioEngine.State.RECORDING_MASTER || prev == AudioEngine.State.OVERDUBBING)
+        ) {
+            if (suppressNextUndoPush) {
+                suppressNextUndoPush = false
+            } else if (undoStack.lastOrNull() != armedTrack) {  // fold repeat passes
+                undoStack.addLast(armedTrack)
+            }
+        }
+        lastEngineState = state
     }
 
     // ------------------------------------------------------------------
@@ -280,7 +313,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onRecordTap() {
         val engine = this.engine ?: return
-        if (_transport.value.isRecording) engine.stopRecording() else engine.startRecording()
+        if (_transport.value.isRecording) {
+            engine.stopRecording()
+        } else {
+            armedTrack = selectedTrackIndex()
+            engine.startRecording()
+        }
     }
 
     fun onPlayTap() {
@@ -306,6 +344,67 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         engine.setMetronomeState(t.metronomeOn, bpm.toFloat(), t.beatsPerMeasure)
         _transport.update { it.copy(bpm = bpm) }
     }
+
+    // ------------------------------------------------------------------
+    // Pedal intents (see PedalController for the key mapping)
+    // ------------------------------------------------------------------
+
+    /** Space: play if stopped, stop if playing. */
+    fun onPlayStopToggle() {
+        if (_transport.value.isPlaying) onStopTap() else onPlayTap()
+    }
+
+    /**
+     * Enter: one-switch loop workflow. No loop -> record the master; press
+     * again -> close it. Loop playing -> start an overdub on the selected
+     * track; press again -> end the pass and auto-advance the selection so
+     * the next press layers onto the next track, hands never leaving the
+     * instrument.
+     */
+    fun onOverdubPedal() {
+        val engine = this.engine ?: return
+        val t = _transport.value
+        if (t.isRecording) {
+            engine.stopRecording()
+            onSelectNextTrack()
+        } else {
+            armedTrack = selectedTrackIndex()
+            engine.startRecording()
+        }
+    }
+
+    /**
+     * Backspace: undo the last recorded track. Mid-recording it cancels the
+     * take in progress instead. Undo granularity is the whole track (the
+     * engine keeps no per-pass history), and when the last recorded track
+     * goes, the loop itself is dropped so the next recording redefines the
+     * loop length.
+     */
+    fun onUndoPedal() {
+        val engine = this.engine ?: return
+        if (_transport.value.isRecording) {
+            suppressNextUndoPush = true  // this pass must not become undoable
+            engine.stopRecording()
+            engine.clearTrack(armedTrack)  // queued after the stop; audio thread serializes
+            return
+        }
+        val track = undoStack.removeLastOrNull() ?: return
+        engine.clearTrack(track)
+        val remaining = engine.trackContentMask and 0xFFFF and (1 shl track).inv()
+        if (remaining == 0) engine.clearAll()
+    }
+
+    fun onSelectNextTrack() = selectRelativeTrack(+1)
+    fun onSelectPreviousTrack() = selectRelativeTrack(-1)
+
+    private fun selectRelativeTrack(delta: Int) {
+        val count = _tracks.value.size
+        if (count == 0) return
+        onTrackSelect((selectedTrackIndex() + delta + count) % count)
+    }
+
+    private fun selectedTrackIndex(): Int =
+        _tracks.value.firstOrNull { it.isSelected }?.index ?: 0
 
     // ------------------------------------------------------------------
     // Track intents

@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -20,6 +21,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.core.content.ContextCompat
 import com.audio.loopstation.ui.MainScreen
 import com.audio.loopstation.ui.MainViewModel
+import com.audio.loopstation.ui.PedalController
 
 /**
  * Thin UI shell. The audio engine lives in [MediaRecordingService]; this
@@ -32,6 +34,7 @@ import com.audio.loopstation.ui.MainViewModel
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
+    private val pedal by lazy { PedalController(viewModel) }
 
     private var recordingService: MediaRecordingService? = null
     private var micPermissionGranted = false
@@ -90,6 +93,14 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /**
+     * Bluetooth foot pedals arrive as HID keyboards; intercepting here (not
+     * via a Compose focus modifier) keeps the pedal alive regardless of
+     * on-screen focus. Unhandled keys fall through to the framework.
+     */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean =
+        pedal.onKeyDown(keyCode, event) || super.onKeyDown(keyCode, event)
 
     override fun onStart() {
         super.onStart()

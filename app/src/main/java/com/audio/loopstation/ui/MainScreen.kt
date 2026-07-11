@@ -31,7 +31,11 @@ import kotlinx.coroutines.launch
 fun MainScreen(viewModel: MainViewModel) {
     val transport by viewModel.transport.collectAsStateWithLifecycle()
     val tracks by viewModel.tracks.collectAsStateWithLifecycle()
-    val waveform by viewModel.waveform.collectAsStateWithLifecycle()
+    // The waveform and playhead flows are deliberately NOT collected here:
+    // they change ~60 times a second, and collecting them in composition
+    // would recompose the whole screen every frame. They are handed down as
+    // flows and only read in the draw phase (WaveformVisualizer /
+    // PlayheadProgressLine).
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -60,6 +64,7 @@ fun MainScreen(viewModel: MainViewModel) {
         bottomBar = {
             TransportBar(
                 transport = transport,
+                position = viewModel.position,
                 onRecordTap = viewModel::onRecordTap,
                 onPlayTap = viewModel::onPlayTap,
                 onStopTap = viewModel::onStopTap,
@@ -89,8 +94,8 @@ fun MainScreen(viewModel: MainViewModel) {
                 TrackRow(
                     track = track,
                     // Live rolling input waveform rides on the selected row;
-                    // per-track offline waveforms are a later phase.
-                    waveform = if (track.isSelected) waveform else null,
+                    // the others get the inert resting line.
+                    waveform = if (track.isSelected) viewModel.waveform else null,
                     onSelect = { viewModel.onTrackSelect(track.index) },
                     onMuteToggle = { viewModel.onMuteToggle(track.index) },
                     onSoloToggle = { viewModel.onSoloToggle(track.index) },

@@ -84,7 +84,15 @@ USB mic ──> input stream callback ──> SpscSampleRing ──┐   (drift-
       loop length/content flags on the audio thread. MainViewModel restores
       the last active session on startup (mix params via the JNI setters,
       audio via the restore worker) and exposes `saveSession()`.
-- [ ] **Phase 6 — Build wiring & polish**: Gradle project (Compose + Room +
+- [x] **Phase 6 — Hardware control & UI polish** (`ui/PedalController.kt`,
+      `ui/WaveformVisualizer.kt`): Bluetooth foot-pedal support via
+      activity-level key interception (Space = play/stop, Enter =
+      overdub + auto-advance, Backspace = undo last track / cancel take,
+      PageUp/Down = track select; auto-repeat swallowed) with a ViewModel
+      undo stack; 60 fps waveform + playhead rendering with
+      draw-phase-only invalidation (produceState + frame clock + meter
+      ballistics) — zero recompositions while audio runs.
+- [ ] **Phase 7 — Build wiring & polish**: Gradle project (Compose + Room +
       Oboe Prefab + NDK), per-track offline waveforms, window-size-class
       layout variants, mixdown render, session browser UI.
 
