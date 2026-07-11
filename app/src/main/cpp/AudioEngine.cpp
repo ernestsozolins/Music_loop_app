@@ -72,6 +72,7 @@ AudioEngine::AudioEngine(const Config& config) : mConfig(config) {
 
   mMetronome.configure(mConfig.sampleRate, mConfig.channelCount);
   mCalibrator.configure(mConfig.sampleRate, mConfig.channelCount);
+  mReverb.configure(mConfig.sampleRate, mConfig.channelCount);
 
   // The spooler's worker threads live for the engine's whole lifetime; the
   // audio callbacks only ever touch its lock-free rings, so starting the
@@ -636,6 +637,14 @@ oboe::DataCallbackResult AudioEngine::onOutputReady(float* audioData, int32_t nu
   if (mCaptureMixSource.load(std::memory_order_relaxed)) {
     mSpooler.writeCaptureFrames(audioData, numFrames);
   }
+
+  // MONITORING-ONLY DSP: the reverb wets what the musician HEARS — loops +
+  // monitor + backing tracks — and nothing that is ever written down. Both
+  // capture tees are upstream (dry), the overdub path reads the input
+  // scratch (dry), and stem export reads the raw track buffers (dry), so
+  // takes and exported stems stay 100% dry by construction. The metronome
+  // is added AFTER, keeping the click precise and un-reverberated.
+  mReverb.process(audioData, numFrames);
 
   // ROUTING INVARIANT: the metronome is mixed into the OUTPUT buffer only,
   // strictly after renderLooper() has finished reading the input scratch and

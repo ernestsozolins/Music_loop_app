@@ -195,6 +195,32 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeClearTrack(J
 }
 
 // ---------------------------------------------------------------------------
+// Output monitoring reverb — parameters are lock-free atomics, safe to drive
+// from a UI slider mid-performance. Applied to the headphone/speaker mix
+// only; recordings and exported stems stay dry.
+// ---------------------------------------------------------------------------
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetReverbRoomSize(
+    JNIEnv*, jobject, jlong handle, jfloat size) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setReverbRoomSize(size);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetReverbMix(
+    JNIEnv*, jobject, jlong handle, jfloat mix) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setReverbMix(mix);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetReverbDamping(
+    JNIEnv*, jobject, jlong handle, jfloat damping) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setReverbDamping(damping);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetReverbEnabled(
+    JNIEnv*, jobject, jlong handle, jboolean enabled) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setReverbEnabled(enabled == JNI_TRUE);
+}
+
+// ---------------------------------------------------------------------------
 // Latency calibration (ping-and-listen)
 // ---------------------------------------------------------------------------
 

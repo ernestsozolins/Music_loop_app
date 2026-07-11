@@ -38,6 +38,7 @@
 #include "LatencyCalibrator.h"
 #include "LockFreeRing.h"
 #include "Metronome.h"
+#include "Reverb.h"
 
 #include <algorithm>
 #include <array>
@@ -180,6 +181,17 @@ class AudioEngine {
   bool metronomeActive() const { return mMetronome.isActive(); }
   uint32_t metronomeBeatCount() const { return mMetronome.beatCount(); }
   int32_t metronomeBeatInBar() const { return mMetronome.beatInBar(); }
+
+  // ----- Output monitoring DSP (control thread; lock-free atomics) -----
+  // Freeverb-style reverb on the MONITORING mix only. Every recordable
+  // signal is tapped upstream of it (input/mix capture tees, overdub path,
+  // stem export), so takes and exported stems stay 100% dry.
+  void setReverbRoomSize(float size) { mReverb.setRoomSize(size); }
+  void setReverbDamping(float damping) { mReverb.setDamping(damping); }
+  void setReverbMix(float mix) { mReverb.setMix(mix); }
+  void setReverbEnabled(bool enabled) { mReverb.setEnabled(enabled); }
+  float reverbRoomSize() const { return mReverb.roomSize(); }
+  float reverbMix() const { return mReverb.mix(); }
 
   // ----- Disk spooling (control thread; async — see DiskSpooler.h) -----
   // Spools the recorded input (or the full mix, pre-metronome, when
@@ -413,6 +425,9 @@ class AudioEngine {
   // Output-path-only click generator (never reaches the record path).
   Metronome mMetronome;
   std::atomic<bool> mMetronomeSyncToLoop{true};
+
+  // Output-path-only monitoring reverb (never reaches the record path).
+  Reverb mReverb;
 
   // Disk spooling: capture tee + backing-track streaming (worker threads
   // owned by the spooler; the audio thread only touches its rings).

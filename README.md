@@ -92,9 +92,16 @@ USB mic ──> input stream callback ──> SpscSampleRing ──┐   (drift-
       undo stack; 60 fps waveform + playhead rendering with
       draw-phase-only invalidation (produceState + frame clock + meter
       ballistics) — zero recompositions while audio runs.
-- [ ] **Phase 7 — Build wiring & polish**: Gradle project (Compose + Room +
+- [x] **Phase 7 — Output DSP (monitoring reverb)** (`Reverb.{h,cpp}`):
+      Freeverb-style Schroeder tank (8 damped combs + 4 allpasses per
+      channel, detuned right tank, denormal-flushed, block-ramped dry/wet)
+      applied to the headphone mix only — capture tees, the overdub path,
+      and stem export are all upstream, so recordings stay 100% dry.
+      Lock-free RoomSize / DryWetMix / Damping / Enabled controls via JNI.
+- [ ] **Next — Build wiring & polish**: Gradle project (Compose + Room +
       Oboe Prefab + NDK), per-track offline waveforms, window-size-class
-      layout variants, mixdown render, session browser UI.
+      layout variants, mixdown render, session browser UI, reverb controls
+      in the transport UI.
 
 ## Engine configuration
 
@@ -155,6 +162,18 @@ frozen while it reads the track buffers (playback stays live). On the Kotlin
 side, `StemExporter` zips stems + capture takes into `Session_Stems.zip`
 (cache dir, FileProvider-mapped) and `ExportStemsButton` hands it to the
 system share sheet via `ACTION_SEND`.
+
+### Monitoring reverb
+
+Dry headphone monitoring feels sterile, so a lightweight Freeverb-style
+Schroeder reverberator (8 parallel damped comb filters + 4 series allpass
+diffusers per channel, right tank detuned for stereo, no convolution, no
+third-party code) runs on the **output mix only**, between the mix-capture
+tee and the metronome. Everything recordable is tapped upstream — takes,
+loop tracks, and exported stems are 100% dry by construction, and the click
+stays un-reverberated. RoomSize / DryWetMix / Damping / Enabled are
+lock-free atomics (dry/wet ramped per block, so slider moves never click);
+the default mix is 0 — fully dry until the user opts in.
 
 ### Engine safety
 

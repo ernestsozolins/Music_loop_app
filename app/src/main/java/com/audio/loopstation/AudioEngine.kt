@@ -222,6 +222,25 @@ class AudioEngine private constructor(private var handle: Long) {
     }
 
     // ------------------------------------------------------------------
+    // Output monitoring reverb (Freeverb tank in C++). Applied ONLY to
+    // the headphone/speaker mix — takes, loop tracks, and exported stems
+    // stay 100% dry. All setters are lock-free; drive them from sliders
+    // freely mid-performance.
+    // ------------------------------------------------------------------
+
+    /** Tail length, 0..1. */
+    fun setReverbRoomSize(size: Float) { if (handle != 0L) nativeSetReverbRoomSize(handle, size) }
+
+    /** Dry/wet balance: 0 = fully dry (default), 1 = fully wet. */
+    fun setReverbMix(mix: Float) { if (handle != 0L) nativeSetReverbMix(handle, mix) }
+
+    /** High-frequency absorption of the tail, 0..1. */
+    fun setReverbDamping(damping: Float) { if (handle != 0L) nativeSetReverbDamping(handle, damping) }
+
+    /** Hard bypass (saves CPU); the tail restarts clean on re-enable. */
+    fun setReverbEnabled(enabled: Boolean) { if (handle != 0L) nativeSetReverbEnabled(handle, enabled) }
+
+    // ------------------------------------------------------------------
     // Disk spooling — long-form capture and backing-track streaming.
     // All file I/O runs on the engine's DiskWriter/DiskReader threads.
     // ------------------------------------------------------------------
@@ -551,6 +570,11 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeSetMetronomeGain(handle: Long, gain: Float)
     private external fun nativeSetMetronomeSync(handle: Long, enabled: Boolean)
     private external fun nativeGetBeatInfo(handle: Long): Long
+
+    private external fun nativeSetReverbRoomSize(handle: Long, size: Float)
+    private external fun nativeSetReverbMix(handle: Long, mix: Float)
+    private external fun nativeSetReverbDamping(handle: Long, damping: Float)
+    private external fun nativeSetReverbEnabled(handle: Long, enabled: Boolean)
 
     private external fun nativeStartCapture(handle: Long, path: String, captureMix: Boolean)
     private external fun nativeStopCapture(handle: Long)
