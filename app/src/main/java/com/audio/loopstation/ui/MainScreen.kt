@@ -53,6 +53,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     var showSessions by remember { mutableStateOf(false) }
+    var showOutputs by remember { mutableStateOf(false) }
 
     if (showSessions) {
         val sessions by viewModel.sessions.collectAsStateWithLifecycle()
@@ -68,6 +69,20 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
             },
             onDelete = viewModel::deleteSession,
             onDismiss = { showSessions = false },
+        )
+    }
+
+    if (showOutputs) {
+        val devices by viewModel.outputDevices.collectAsStateWithLifecycle()
+        val selectedId by viewModel.selectedOutputId.collectAsStateWithLifecycle()
+        OutputDeviceSheet(
+            devices = devices,
+            selectedId = selectedId,
+            onSelect = { id ->
+                viewModel.onSelectOutputDevice(id)
+                showOutputs = false
+            },
+            onDismiss = { showOutputs = false },
         )
     }
 
@@ -121,6 +136,10 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                     }
                 },
                 onSessionsTap = { showSessions = true },
+                onOutputTap = {
+                    viewModel.refreshOutputDevices()
+                    showOutputs = true
+                },
             )
         },
     ) { innerPadding ->

@@ -55,6 +55,7 @@ fun TransportBar(
     onQuantizeToggle: () -> Unit,
     onSaveTap: () -> Unit,
     onSessionsTap: () -> Unit,
+    onOutputTap: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Surface(modifier = modifier, tonalElevation = 3.dp) {
@@ -149,6 +150,7 @@ fun TransportBar(
                     label = { Text("Quantize") },
                 )
                 Spacer(Modifier.weight(1f))
+                TextButton(onClick = onOutputTap) { Text("Output") }
                 TextButton(onClick = onSessionsTap) { Text("Sessions") }
                 Button(onClick = onSaveTap, enabled = !transport.saving) {
                     Text(if (transport.saving) "Saving…" else "Save")

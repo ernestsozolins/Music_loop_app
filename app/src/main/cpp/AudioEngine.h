@@ -133,6 +133,18 @@ class AudioEngine {
   void stop();
   bool isRunning() const { return mUserRunning.load(std::memory_order_acquire); }
 
+  // ----- Audio routing (control thread) -----
+  // Retarget the output (playback) or input (capture) device by its
+  // AudioDeviceInfo id (0 = system default). Oboe can't move a live stream,
+  // so if the engine is running this stops and reopens both streams on the
+  // new device — loop content, transport state, and recordings are preserved
+  // (a brief re-prime gap is possible mid-take). Applies on the next start()
+  // when not running. Returns the reopen result.
+  oboe::Result setOutputDevice(int32_t deviceId);
+  oboe::Result setInputDevice(int32_t deviceId);
+  int32_t outputDeviceId() const { return mOutputDeviceId.load(std::memory_order_relaxed); }
+  int32_t inputDeviceId() const { return mInputDeviceId.load(std::memory_order_relaxed); }
+
   // ----- Engine events -----
   // Fired from Oboe's non-realtime error thread (never from the audio
   // callbacks) when a device disconnects (e.g. USB interface unplugged) and
@@ -493,6 +505,12 @@ class AudioEngine {
   std::atomic<bool> mQuantizeBars{true};
   uint32_t mCountInStartBeat = 0;  // audio thread only
   int32_t mMasterStopAt = 0;       // audio thread only; 0 = no scheduled stop
+
+  // Current routing (mirrors mConfig.*DeviceId for lock-free UI reads;
+  // authoritative value is changed under mLifecycleMutex in openStreams).
+  std::atomic<int32_t> mOutputDeviceId{0};
+  std::atomic<int32_t> mInputDeviceId{0};
+  oboe::Result applyDeviceChangeLocked();  // stop+reopen to apply a routing change
 
   // Input channel mapping for multichannel interfaces.
   int32_t mInputRequestChannels = 0;  // guarded by mLifecycleMutex; 0 = engine ch

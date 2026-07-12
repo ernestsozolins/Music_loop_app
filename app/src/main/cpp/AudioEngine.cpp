@@ -80,6 +80,8 @@ AudioEngine::AudioEngine(const Config& config) : mConfig(config) {
   mReverb.configure(mConfig.sampleRate, mConfig.channelCount);
   mLimiter.configure(mConfig.sampleRate, mConfig.channelCount);
   mInputMapR.store(mConfig.channelCount > 1 ? 1 : 0, std::memory_order_relaxed);
+  mOutputDeviceId.store(mConfig.outputDeviceId, std::memory_order_relaxed);
+  mInputDeviceId.store(mConfig.inputDeviceId, std::memory_order_relaxed);
 
   // The spooler's worker threads live for the engine's whole lifetime; the
   // audio callbacks only ever touch its lock-free rings, so starting the
@@ -158,6 +160,34 @@ void AudioEngine::stopLocked() {
   if (mOutputStream) mOutputStream->stop();
   if (mInputStream) mInputStream->stop();
   closeStreams();
+}
+
+oboe::Result AudioEngine::setOutputDevice(int32_t deviceId) {
+  std::lock_guard<std::mutex> lock(mLifecycleMutex);
+  mConfig.outputDeviceId = deviceId;
+  mOutputDeviceId.store(deviceId, std::memory_order_relaxed);
+  return applyDeviceChangeLocked();
+}
+
+oboe::Result AudioEngine::setInputDevice(int32_t deviceId) {
+  std::lock_guard<std::mutex> lock(mLifecycleMutex);
+  mConfig.inputDeviceId = deviceId;
+  mInputDeviceId.store(deviceId, std::memory_order_relaxed);
+  return applyDeviceChangeLocked();
+}
+
+oboe::Result AudioEngine::applyDeviceChangeLocked() {
+  // Not running yet: the new device id is picked up by the next start().
+  if (!mUserRunning.load(std::memory_order_acquire)) return oboe::Result::OK;
+  // Running: reopen both streams on the new device. Loop content, transport
+  // state, and any in-progress recording survive (only the streams + input
+  // ring reset). Same machinery as the disconnect-recovery restart.
+  stopLocked();
+  const oboe::Result result = startLocked();
+  if (result != oboe::Result::OK) {
+    LOGW("device change reopen failed: %s", oboe::convertToText(result));
+  }
+  return result;
 }
 
 oboe::Result AudioEngine::openStreams() {
@@ -272,12 +302,23 @@ void AudioEngine::onStreamErrorAfterClose(oboe::AudioStream* stream, oboe::Resul
     // Ignore stale events from a stream generation we already replaced.
     if (stream != mInputStream.get() && stream != mOutputStream.get()) return;
 
-    LOGI("restarting duplex pair on current default devices");
+    LOGI("restarting duplex pair after disconnect");
     stopLocked();
     result = startLocked();
     attempted = true;
     if (result != oboe::Result::OK) {
       LOGW("restart after disconnect failed: %s", oboe::convertToText(result));
+      // The explicitly-selected device (e.g. the Bluetooth sink the user
+      // picked) is likely the one that vanished — fall back to the system
+      // default so audio isn't lost.
+      if (mConfig.outputDeviceId != 0 || mConfig.inputDeviceId != 0) {
+        mConfig.outputDeviceId = 0;
+        mConfig.inputDeviceId = 0;
+        mOutputDeviceId.store(0, std::memory_order_relaxed);
+        mInputDeviceId.store(0, std::memory_order_relaxed);
+        result = startLocked();
+        LOGI("fell back to system default devices: %s", oboe::convertToText(result));
+      }
     }
   }
   // Fire outside the lifecycle lock so a listener reacting to the event can

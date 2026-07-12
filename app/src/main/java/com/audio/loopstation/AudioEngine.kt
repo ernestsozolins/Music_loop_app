@@ -125,6 +125,26 @@ class AudioEngine private constructor(private var handle: Long) {
         if (handle != 0L) nativeStop(handle)
     }
 
+    /**
+     * Routes playback to an [android.media.AudioDeviceInfo] id (0 = system
+     * default). Reopens the streams if running — loops and any in-progress
+     * recording survive. Blocks briefly, so runs on [Dispatchers.IO].
+     */
+    suspend fun setOutputDevice(deviceId: Int): Boolean = withContext(Dispatchers.IO) {
+        val h = handle
+        h != 0L && nativeSetOutputDevice(h, deviceId)
+    }
+
+    /** Routes capture to a device id (0 = system default). Same semantics. */
+    suspend fun setInputDevice(deviceId: Int): Boolean = withContext(Dispatchers.IO) {
+        val h = handle
+        h != 0L && nativeSetInputDevice(h, deviceId)
+    }
+
+    /** The currently targeted output device id (0 = system default). */
+    val outputDeviceId: Int
+        get() = if (handle != 0L) nativeGetOutputDevice(handle) else 0
+
     /** Destroys the native engine. The instance must not be used afterwards. */
     fun release() {
         val h = handle
@@ -616,6 +636,9 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeDestroy(handle: Long)
     private external fun nativeStart(handle: Long): Boolean
     private external fun nativeStop(handle: Long)
+    private external fun nativeSetOutputDevice(handle: Long, deviceId: Int): Boolean
+    private external fun nativeSetInputDevice(handle: Long, deviceId: Int): Boolean
+    private external fun nativeGetOutputDevice(handle: Long): Int
     private external fun nativeSetEventListener(handle: Long, listener: Any?)
 
     private external fun nativeStartCalibration(handle: Long)

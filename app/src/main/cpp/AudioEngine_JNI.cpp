@@ -159,6 +159,29 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeStop(JNIEnv*
   if (AudioEngine* engine = fromHandle(handle)) engine->stop();
 }
 
+// Retarget playback/capture to an AudioDeviceInfo id (0 = system default).
+// Reopens the streams if running; returns true on success. Blocks briefly —
+// call off the main thread.
+JNIEXPORT jboolean JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetOutputDevice(
+    JNIEnv*, jobject, jlong handle, jint deviceId) {
+  AudioEngine* engine = fromHandle(handle);
+  return (engine != nullptr && engine->setOutputDevice(deviceId) == oboe::Result::OK) ? JNI_TRUE
+                                                                                      : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetInputDevice(
+    JNIEnv*, jobject, jlong handle, jint deviceId) {
+  AudioEngine* engine = fromHandle(handle);
+  return (engine != nullptr && engine->setInputDevice(deviceId) == oboe::Result::OK) ? JNI_TRUE
+                                                                                     : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetOutputDevice(JNIEnv*, jobject,
+                                                                                    jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->outputDeviceId() : 0;
+}
+
 // ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------

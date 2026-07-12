@@ -129,6 +129,10 @@ Beyond the seven-phase blueprint, the app adds:
   to the engine rate on the reader thread instead of being rejected.
 - **Multichannel input mapping** — pick a stereo pair from a 4-channel
   interface (e.g. an H2n surround mode).
+- **Playback-device picker** — choose the output (built-in speaker, wired,
+  Bluetooth, USB, …) from an in-app sheet; the engine reopens the streams on
+  the chosen device and falls back to the system default if it disappears.
+  Loops and in-progress recording survive the switch.
 - **Session persistence UI** — autosave on background, a **Save** button, and
   a **Sessions** browser (load/delete) backed by Room Flows.
 - **Adaptive tablet layout** — expanded-width windows use a two-column grid.
