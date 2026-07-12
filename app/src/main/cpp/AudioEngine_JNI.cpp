@@ -206,6 +206,38 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeStopPlayback
   if (AudioEngine* engine = fromHandle(handle)) engine->stopPlayback();
 }
 
+// ----- Per-track transport (RC-505 model) -----
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeRecordTrack(
+    JNIEnv*, jobject, jlong handle, jint track) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->recordTrack(track);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativePlayTrack(
+    JNIEnv*, jobject, jlong handle, jint track) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->playTrack(track);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeStopTrack(
+    JNIEnv*, jobject, jlong handle, jint track) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->stopTrack(track);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativePlayAll(JNIEnv*, jobject,
+                                                                            jlong handle) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->playAll();
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeStopAll(JNIEnv*, jobject,
+                                                                           jlong handle) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->stopAll();
+}
+
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetTrackTransport(
+    JNIEnv*, jobject, jlong handle, jint track) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? static_cast<jint>(engine->trackTransport(track)) : 0;
+}
+
 JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeClearAll(JNIEnv*, jobject,
                                                                              jlong handle) {
   if (AudioEngine* engine = fromHandle(handle)) engine->clearAll();

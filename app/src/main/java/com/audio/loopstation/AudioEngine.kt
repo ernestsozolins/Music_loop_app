@@ -88,6 +88,18 @@ class AudioEngine private constructor(private var handle: Long) {
         }
     }
 
+    /** Mirrors looper::TrackTransport — per-track play/record/stop state. */
+    enum class TrackTransport {
+        EMPTY, RECORDING, OVERDUBBING, PLAYING, STOPPED;
+
+        val isPlaying: Boolean get() = this == PLAYING || this == OVERDUBBING
+        val isRecording: Boolean get() = this == RECORDING || this == OVERDUBBING
+
+        companion object {
+            fun fromNative(ordinal: Int): TrackTransport = entries.getOrElse(ordinal) { EMPTY }
+        }
+    }
+
     /** Most recent per-block meter values from the audio callback. */
     class MeterPoint(
         val inputRms: Float,
@@ -208,11 +220,34 @@ class AudioEngine private constructor(private var handle: Long) {
     /** Closes the master loop (and starts playback) or ends the overdub pass. */
     fun stopRecording() { if (handle != 0L) nativeStopRecording(handle) }
 
-    /** (Re)starts playback from the top of the loop. */
+    /** (Re)starts playback from the top of the loop (all tracks). */
     fun startPlayback() { if (handle != 0L) nativeStartPlayback(handle) }
 
     /** Halts the transport; cancels a master recording in progress. */
     fun stopPlayback() { if (handle != 0L) nativeStopPlayback(handle) }
+
+    // ------------------------------------------------------------------
+    // Per-track transport (RC-505 model): each track is an independent
+    // loop player with its own record/play/stop and its own playhead.
+    // ------------------------------------------------------------------
+
+    /** Toggle record/overdub on a track (fresh -> record, playing -> overdub). */
+    fun recordTrack(track: Int) { if (handle != 0L) nativeRecordTrack(handle, track) }
+
+    /** (Re)start a track from its beginning (frame 0). */
+    fun playTrack(track: Int) { if (handle != 0L) nativePlayTrack(handle, track) }
+
+    /** Stop just this track. */
+    fun stopTrack(track: Int) { if (handle != 0L) nativeStopTrack(handle, track) }
+
+    /** Start every track that holds content, from the top. */
+    fun playAll() { if (handle != 0L) nativePlayAll(handle) }
+
+    /** Stop every track (and cancel a master take in progress). */
+    fun stopAll() { if (handle != 0L) nativeStopAll(handle) }
+
+    fun trackTransport(track: Int): TrackTransport =
+        TrackTransport.fromNative(if (handle != 0L) nativeGetTrackTransport(handle, track) else 0)
 
     fun clearAll() { if (handle != 0L) nativeClearAll(handle) }
     fun clearTrack(track: Int) { if (handle != 0L) nativeClearTrack(handle, track) }
@@ -688,6 +723,12 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeStopRecording(handle: Long)
     private external fun nativeStartPlayback(handle: Long)
     private external fun nativeStopPlayback(handle: Long)
+    private external fun nativeRecordTrack(handle: Long, track: Int)
+    private external fun nativePlayTrack(handle: Long, track: Int)
+    private external fun nativeStopTrack(handle: Long, track: Int)
+    private external fun nativePlayAll(handle: Long)
+    private external fun nativeStopAll(handle: Long)
+    private external fun nativeGetTrackTransport(handle: Long, track: Int): Int
     private external fun nativeClearAll(handle: Long)
     private external fun nativeClearTrack(handle: Long, track: Int)
     private external fun nativeResetLoopForRestore(handle: Long)

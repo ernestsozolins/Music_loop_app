@@ -1070,15 +1070,25 @@ void AudioEngine::applyCommand(const Command& cmd) {
       stopTrackInternal(clampTrackIndex(cmd.intArg));
       break;
     case CommandType::Play:      // legacy alias
-    case CommandType::PlayAll:
-      for (int32_t t = 0; t < mConfig.trackCount; ++t) startTrackPlaying(t);
+    case CommandType::PlayAll: {
+      // All Start: rewind the shared clock and start every track from the top.
+      setPlayhead(0);
+      for (int32_t t = 0; t < mConfig.trackCount; ++t) {
+        LoopTrack& tr = mTracks[t];
+        if (tr.hasContent.load(std::memory_order_relaxed) &&
+            !tr.clearing.load(std::memory_order_relaxed)) {
+          tr.posFrames.store(0, std::memory_order_relaxed);
+          tr.transport.store(static_cast<uint8_t>(TrackTransport::Playing),
+                             std::memory_order_relaxed);
+        }
+      }
       break;
+    }
     case CommandType::Stop:      // legacy alias
     case CommandType::StopAll: {
       if (st == EngineState::RecordingMaster || st == EngineState::CountIn) {
         mMasterRecordPos = 0;
         mMasterStopAt = 0;
-        setPlayhead(0);
         mTracks[mCountInTrack].transport.store(
             static_cast<uint8_t>(TrackTransport::Empty), std::memory_order_relaxed);
         mTracks[mOverdubTrack].transport.store(
@@ -1086,6 +1096,7 @@ void AudioEngine::applyCommand(const Command& cmd) {
         mState.store(EngineState::Idle, std::memory_order_relaxed);
       }
       for (int32_t t = 0; t < mConfig.trackCount; ++t) stopTrackInternal(t);
+      setPlayhead(0);  // rewind so the next All Start begins at the top
       break;
     }
 
@@ -1256,14 +1267,28 @@ void AudioEngine::recordStopTrack(int32_t track) {
 }
 
 // (Re)start a track from its beginning; no-op on an empty/clearing track.
+// If nothing else is running, the shared loop clock rewinds to the top so the
+// track truly starts from its start; if other tracks are already going, this
+// one joins them locked to the current phase (they must stay in time).
 void AudioEngine::startTrackPlaying(int32_t track) {
   LoopTrack& tr = mTracks[track];
   if (!tr.hasContent.load(std::memory_order_relaxed) ||
       tr.clearing.load(std::memory_order_relaxed)) {
     return;
   }
-  tr.pos = 0;
-  tr.posFrames.store(0, std::memory_order_relaxed);
+  bool othersBusy = false;
+  for (int32_t o = 0; o < mConfig.trackCount; ++o) {
+    if (o == track) continue;
+    const uint8_t tp = mTracks[o].transport.load(std::memory_order_relaxed);
+    if (tp == static_cast<uint8_t>(TrackTransport::Playing) ||
+        tp == static_cast<uint8_t>(TrackTransport::Overdubbing) ||
+        tp == static_cast<uint8_t>(TrackTransport::Recording)) {
+      othersBusy = true;
+      break;
+    }
+  }
+  if (!othersBusy) setPlayhead(0);
+  tr.posFrames.store(mPlayhead, std::memory_order_relaxed);
   tr.transport.store(static_cast<uint8_t>(TrackTransport::Playing), std::memory_order_relaxed);
 }
 
@@ -1497,102 +1522,106 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
     }
   }
 
-  // ---- With a master loop present: capture fixed-length takes AND play the
-  // rest, so a track can record while others loop (independent transports).
+  // ---- With a master loop present: every track shares one loop clock
+  // (mPlayhead = the global phase), so layers stay locked. Playing tracks are
+  // read at the phase; fixed-length takes and overdubs are written at the
+  // phase (minus the calibrated round-trip), so new material lands beat-locked
+  // to what the performer heard. Tracks that are stopped are simply silent.
   if (mLoopLen > 0) {
-    // (a) Fixed-length record captures: a track recording exactly one loop.
-    for (int32_t t = 0; t < mConfig.trackCount; ++t) {
-      LoopTrack& tr = mTracks[t];
-      if (tr.transport.load(std::memory_order_relaxed) != static_cast<uint8_t>(TT::Recording)) {
-        continue;
-      }
-      const int32_t n = std::min(frames, mLoopLen - tr.recPos);
-      if (n > 0) {
-        std::memcpy(&tr.data[static_cast<size_t>(tr.recPos) * ch], in,
-                    static_cast<size_t>(n) * ch * sizeof(float));
-        tr.recPos += n;
-      }
-      tr.posFrames.store(tr.recPos, std::memory_order_relaxed);
-      if (tr.recPos >= mLoopLen) finalizeTrackRecord(t);  // one loop captured
-    }
+    const int32_t phaseStart = mPlayhead;
+    int32_t recOffset = mRecordOffset.load(std::memory_order_relaxed) % mLoopLen;
+    if (recOffset < 0) recOffset += mLoopLen;
 
-    // (b) Playback + overdub mix. Each playing track advances its OWN
-    // playhead, so tracks can be started from the top independently.
+    // Read (playback) targets.
     const float* srcs[kMaxTracks];
     float gainL[kMaxTracks];
     float gainR[kMaxTracks];
-    int32_t rd[kMaxTracks];        // read cursor (start-shift applied)
-    int32_t posStart[kMaxTracks];  // track pos at block start (O(1) write-back)
-    int32_t trk[kMaxTracks];       // originating track index
-    float* odData[kMaxTracks];     // overdub write buffer (null if not dubbing)
-    int32_t odPos[kMaxTracks];     // overdub write cursor
-    int32_t active = 0;
-    int32_t recOffset = mRecordOffset.load(std::memory_order_relaxed) % mLoopLen;
-    if (recOffset < 0) recOffset += mLoopLen;
+    int32_t rd[kMaxTracks];
+    int32_t rdTrack[kMaxTracks];
+    int32_t nRead = 0;
+    // Write targets: fresh fixed-length takes (overwrite, bounded to one loop)
+    // and overdubs (sum, continuous).
+    float* wData[kMaxTracks];
+    int32_t wPos[kMaxTracks];
+    int32_t wCount[kMaxTracks];  // frames to write THIS block
+    bool wSum[kMaxTracks];       // true: overdub (+=); false: fresh take (=)
+    int32_t wTrack[kMaxTracks];
+    int32_t nWrite = 0;
+    bool active = false;  // does the loop clock advance this block?
+
     for (int32_t t = 0; t < mConfig.trackCount; ++t) {
       LoopTrack& track = mTracks[t];
       const uint8_t tp = track.transport.load(std::memory_order_relaxed);
       const bool playing = tp == static_cast<uint8_t>(TT::Playing) ||
                            tp == static_cast<uint8_t>(TT::Overdubbing);
-      if (!playing || !track.hasContent.load(std::memory_order_relaxed) ||
-          track.muted.load(std::memory_order_relaxed) ||
-          track.clearing.load(std::memory_order_relaxed)) {
-        continue;
+      const bool recording = tp == static_cast<uint8_t>(TT::Recording);
+      if (playing && track.hasContent.load(std::memory_order_relaxed) &&
+          !track.muted.load(std::memory_order_relaxed) &&
+          !track.clearing.load(std::memory_order_relaxed)) {
+        srcs[nRead] = track.data.data();
+        const float g = track.gain.load(std::memory_order_relaxed);
+        const float pan = (ch == 2) ? track.pan.load(std::memory_order_relaxed) : 0.0f;
+        gainL[nRead] = g * (pan > 0.0f ? 1.0f - pan : 1.0f);
+        gainR[nRead] = g * (pan < 0.0f ? 1.0f + pan : 1.0f);
+        int32_t off = track.playOffset.load(std::memory_order_relaxed) % mLoopLen;
+        if (off < 0) off += mLoopLen;
+        rd[nRead] = (phaseStart + off) % mLoopLen;
+        rdTrack[nRead] = t;
+        ++nRead;
       }
-      srcs[active] = track.data.data();
-      const float g = track.gain.load(std::memory_order_relaxed);
-      const float pan = (ch == 2) ? track.pan.load(std::memory_order_relaxed) : 0.0f;
-      gainL[active] = g * (pan > 0.0f ? 1.0f - pan : 1.0f);
-      gainR[active] = g * (pan < 0.0f ? 1.0f + pan : 1.0f);
-      int32_t off = track.playOffset.load(std::memory_order_relaxed) % mLoopLen;
-      if (off < 0) off += mLoopLen;
-      posStart[active] = track.pos;
-      rd[active] = (track.pos + off) % mLoopLen;
-      trk[active] = t;
-      if (tp == static_cast<uint8_t>(TT::Overdubbing)) {
-        // Write the live input this many frames BEHIND the track's playhead so
-        // it lands where the performer heard the loop (calibrated round trip).
-        odData[active] = track.data.data();
-        int32_t op = track.pos - recOffset;
-        if (op < 0) op += mLoopLen;
-        odPos[active] = op;
-      } else {
-        odData[active] = nullptr;
-        odPos[active] = 0;
+      if (recording || tp == static_cast<uint8_t>(TT::Overdubbing)) {
+        wData[nWrite] = track.data.data();
+        int32_t wp = phaseStart - recOffset;
+        if (wp < 0) wp += mLoopLen;
+        wPos[nWrite] = wp;
+        wSum[nWrite] = (tp == static_cast<uint8_t>(TT::Overdubbing));
+        // A fresh take captures exactly one loop; an overdub runs continuously.
+        wCount[nWrite] = wSum[nWrite] ? frames : std::min(frames, mLoopLen - track.recPos);
+        wTrack[nWrite] = t;
+        ++nWrite;
       }
-      ++active;
+      if (playing || recording) active = true;
     }
 
     for (int32_t f = 0; f < frames; ++f) {
       float* o = out + static_cast<size_t>(f) * ch;
       const float* inF = in + static_cast<size_t>(f) * ch;
-      for (int32_t a = 0; a < active; ++a) {
+      for (int32_t a = 0; a < nRead; ++a) {
         const float* s = srcs[a] + static_cast<size_t>(rd[a]) * ch;
         o[0] += s[0] * gainL[a];
         if (ch == 2) o[1] += s[1] * gainR[a];
         if (++rd[a] >= mLoopLen) rd[a] = 0;
-        if (odData[a] != nullptr) {
-          float* d = odData[a] + static_cast<size_t>(odPos[a]) * ch;
+      }
+      for (int32_t w = 0; w < nWrite; ++w) {
+        if (f >= wCount[w]) continue;
+        float* d = wData[w] + static_cast<size_t>(wPos[w]) * ch;
+        if (wSum[w]) {
           for (int32_t c = 0; c < ch; ++c) d[c] += inF[c];
-          if (++odPos[a] >= mLoopLen) odPos[a] = 0;
+        } else {
+          for (int32_t c = 0; c < ch; ++c) d[c] = inF[c];
         }
+        if (++wPos[w] >= mLoopLen) wPos[w] = 0;
       }
     }
 
-    // Advance each active track's playhead by exactly `frames` and publish it.
-    for (int32_t a = 0; a < active; ++a) {
-      int32_t np = posStart[a] + frames;
-      np %= mLoopLen;
-      mTracks[trk[a]].pos = np;
-      mTracks[trk[a]].posFrames.store(np, std::memory_order_relaxed);
+    // Grow fresh-take cursors and close a take once a full loop is captured.
+    for (int32_t w = 0; w < nWrite; ++w) {
+      if (wSum[w]) continue;  // overdub: no fixed length
+      LoopTrack& tr = mTracks[wTrack[w]];
+      tr.recPos += wCount[w];
+      tr.posFrames.store(tr.recPos, std::memory_order_relaxed);
+      if (tr.recPos >= mLoopLen) finalizeTrackRecord(wTrack[w]);
     }
 
-    // Master mirror: drive the global playhead line + metronome sync from the
-    // reference track while it is playing.
-    const uint8_t mtp = mTracks[mMasterTrack].transport.load(std::memory_order_relaxed);
-    if (mtp == static_cast<uint8_t>(TT::Playing) ||
-        mtp == static_cast<uint8_t>(TT::Overdubbing)) {
-      setPlayhead(mTracks[mMasterTrack].pos);
+    // Advance the shared loop clock and publish it as each playing track's
+    // position (they are all locked to the same phase).
+    if (active) {
+      int32_t np = phaseStart + frames;
+      np %= mLoopLen;
+      setPlayhead(np);
+    }
+    for (int32_t a = 0; a < nRead; ++a) {
+      mTracks[rdTrack[a]].posFrames.store(mPlayhead, std::memory_order_relaxed);
     }
   }
 }

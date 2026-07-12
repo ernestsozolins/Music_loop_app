@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledIconToggleButton
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -25,8 +27,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.audio.loopstation.AudioEngine.TrackTransport
 import com.audio.loopstation.ui.MainViewModel.TrackUiState
 import kotlinx.coroutines.flow.StateFlow
 
@@ -47,6 +51,9 @@ fun TrackRow(
     waveform: StateFlow<FloatArray>?,
     offlineWaveform: FloatArray?,
     onSelect: () -> Unit,
+    onRecord: () -> Unit,
+    onPlay: () -> Unit,
+    onStop: () -> Unit,
     onMuteToggle: () -> Unit,
     onSoloToggle: () -> Unit,
     onVolumeChange: (Float) -> Unit,
@@ -100,18 +107,29 @@ fun TrackRow(
                         },
                     )
                     Text(
-                        text = when {
-                            track.isClearing -> "Clearing…"
-                            track.isSelected && track.hasContent -> "● SELECTED · Recorded"
-                            track.isSelected -> "● SELECTED · Armed to record"
-                            track.hasContent -> "Recorded"
-                            else -> "Empty"
+                        text = buildString {
+                            if (track.isSelected) append("● SELECTED · ")
+                            append(
+                                when {
+                                    track.isClearing -> "Clearing…"
+                                    track.transport == TrackTransport.RECORDING -> "REC"
+                                    track.transport == TrackTransport.OVERDUBBING -> "OVERDUB"
+                                    track.transport == TrackTransport.PLAYING -> "Playing"
+                                    track.transport == TrackTransport.STOPPED -> "Stopped"
+                                    track.hasContent -> "Ready"
+                                    else -> "Empty"
+                                },
+                            )
                         },
                         style = MaterialTheme.typography.labelMedium,
-                        color = if (track.isSelected) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
+                        color = when (track.transport) {
+                            TrackTransport.RECORDING, TrackTransport.OVERDUBBING ->
+                                MaterialTheme.colorScheme.error
+                            else -> if (track.isSelected) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
                         },
                     )
                 }
@@ -119,6 +137,17 @@ fun TrackRow(
                 Spacer(Modifier.width(8.dp))
                 ToggleChip(label = "S", checked = track.soloed, onToggle = onSoloToggle)
             }
+
+            // Per-track transport: the RC-505 channel-strip buttons. Big
+            // targets so they're hittable mid-performance; Rec toggles
+            // record/overdub, Play restarts this track from its top, Stop
+            // halts just this track.
+            TrackTransportBar(
+                track = track,
+                onRecord = onRecord,
+                onPlay = onPlay,
+                onStop = onStop,
+            )
 
             // Selected row: live input meter. Recorded rows: the actual loop
             // audio (offline peaks). Empty rows: resting line.
@@ -187,6 +216,74 @@ fun TrackRow(
 }
 
 @Composable
+private fun TrackTransportBar(
+    track: TrackUiState,
+    onRecord: () -> Unit,
+    onPlay: () -> Unit,
+    onStop: () -> Unit,
+) {
+    val recording = track.transport == TrackTransport.RECORDING ||
+        track.transport == TrackTransport.OVERDUBBING
+    val playing = track.transport.isPlaying
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier.padding(top = 8.dp),
+    ) {
+        // Record / overdub — red while a pass is live so it reads at a glance.
+        FilledIconButton(
+            onClick = onRecord,
+            enabled = !track.isClearing,
+            modifier = Modifier.size(TRACK_BUTTON),
+            colors = IconButtonDefaults.filledIconButtonColors(
+                containerColor = if (recording) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.errorContainer
+                },
+            ),
+        ) {
+            Text(
+                text = "●",
+                style = MaterialTheme.typography.titleLarge,
+                color = if (recording) {
+                    MaterialTheme.colorScheme.onError
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
+            )
+        }
+        // Play from the top of this track.
+        FilledTonalIconButton(
+            onClick = onPlay,
+            enabled = track.hasContent && !track.isClearing,
+            modifier = Modifier.size(TRACK_BUTTON),
+            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                containerColor = if (playing) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.secondaryContainer
+                },
+            ),
+        ) {
+            Text(
+                "▶",
+                style = MaterialTheme.typography.titleMedium,
+                color = if (playing) MaterialTheme.colorScheme.onPrimary else Color.Unspecified,
+            )
+        }
+        // Stop just this track.
+        FilledTonalIconButton(
+            onClick = onStop,
+            enabled = playing || recording,
+            modifier = Modifier.size(TRACK_BUTTON),
+        ) {
+            Text("■", style = MaterialTheme.typography.titleMedium)
+        }
+    }
+}
+
+@Composable
 private fun ToggleChip(label: String, checked: Boolean, onToggle: () -> Unit) {
     FilledIconToggleButton(
         checked = checked,
@@ -226,3 +323,4 @@ private fun LabeledSlider(
 
 
 private const val NUDGE_MS = 10  // per-tap start-shift step
+private val TRACK_BUTTON = 52.dp  // per-track transport button size

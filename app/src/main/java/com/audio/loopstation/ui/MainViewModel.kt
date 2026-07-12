@@ -67,6 +67,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val volume: Float = 0.8f,
         val pan: Float = 0.0f,     // -1..1 balance
         val shiftMs: Int = 0,      // start-shift, signed ms
+        // Per-track transport (RC-505 model): independent play/record/stop.
+        val transport: AudioEngine.TrackTransport = AudioEngine.TrackTransport.EMPTY,
     )
 
     // NOTE: the playhead position deliberately does NOT live here. It
@@ -121,8 +123,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // death (a restored session starts with an empty undo history).
     private val undoStack = ArrayDeque<Int>()
     private var armedTrack = 0
-    private var suppressNextUndoPush = false
-    private var lastEngineState = AudioEngine.State.IDLE
+    // Track index whose next record-close must NOT push to the undo stack
+    // (that close is itself an undo); -1 = none.
+    private var suppressUndoFor = -1
+    // Previous per-track transport, for detecting record-close transitions.
+    private val prevTransports = HashMap<Int, AudioEngine.TrackTransport>()
 
     private val _transport = MutableStateFlow(TransportUiState())
     val transport: StateFlow<TransportUiState> = _transport.asStateFlow()
@@ -417,6 +422,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 t.copy(
                     hasContent = mask and (1 shl t.index) != 0,
                     isClearing = mask and (1 shl (t.index + 16)) != 0,
+                    transport = engine.trackTransport(t.index),  // per-track play/rec/stop
                 )
             }
         }
@@ -468,21 +474,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // A recording/overdub pass just ended: remember which track it
-        // landed on so the pedal's Backspace can undo it, and repaint its
-        // offline waveform (an overdub changes audio without changing mask).
-        val prev = lastEngineState
-        if (prev != state &&
-            (prev == AudioEngine.State.RECORDING_MASTER || prev == AudioEngine.State.OVERDUBBING)
-        ) {
-            refreshTrackWaveform(armedTrack)
-            if (suppressNextUndoPush) {
-                suppressNextUndoPush = false
-            } else if (undoStack.lastOrNull() != armedTrack) {  // fold repeat passes
-                undoStack.addLast(armedTrack)
+        // Per-track record-completion detection: when a track leaves a
+        // recording/overdub state its take just closed, so repaint its offline
+        // waveform (audio changed without the content mask changing) and push
+        // it onto the undo stack (unless this close is itself being undone).
+        for (t in _tracks.value) {
+            val cur = t.transport
+            val prev = prevTransports[t.index] ?: AudioEngine.TrackTransport.EMPTY
+            if (prev.isRecording && !cur.isRecording) {
+                refreshTrackWaveform(t.index)
+                if (suppressUndoFor == t.index) {
+                    suppressUndoFor = -1
+                } else if (t.hasContent && undoStack.lastOrNull() != t.index) {  // fold repeats
+                    undoStack.addLast(t.index)
+                }
             }
+            prevTransports[t.index] = cur
         }
-        lastEngineState = state
     }
 
     private fun refreshTrackWaveform(index: Int) {
@@ -584,7 +592,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun onUndoPedal() {
         val engine = this.engine ?: return
         if (_transport.value.isRecording) {
-            suppressNextUndoPush = true  // this pass must not become undoable
+            suppressUndoFor = armedTrack  // this pass must not become undoable
             engine.stopRecording()
             val track = armedTrack
             viewModelScope.launch(Dispatchers.Default) { undoTrack(engine, track) }
@@ -625,6 +633,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun onTrackSelect(index: Int) {
         engine?.selectTrack(index) ?: return
         _tracks.update { list -> list.map { it.copy(isSelected = it.index == index) } }
+    }
+
+    // ---- Per-track transport (RC-505 channel-strip buttons) ----
+
+    /** Record button: arm/close record or overdub on this track. */
+    fun onTrackRecord(index: Int) {
+        val engine = this.engine ?: return
+        onTrackSelect(index)          // recording targets become the selected track
+        ensureEngineRunning()         // reopen the mic if a Stop released it
+        val recording = _tracks.value.getOrNull(index)?.transport?.isRecording == true
+        if (recording) {
+            engine.recordTrack(index)  // closing a pass — no snapshot needed
+        } else {
+            armedTrack = index
+            // Snapshot the pre-pass audio for Backspace/undo (multi-MB, off-main).
+            viewModelScope.launch(Dispatchers.Default) {
+                engine.snapshotTrackForUndo(index)
+                engine.recordTrack(index)
+            }
+        }
+    }
+
+    /** Play button: (re)start this track from its beginning. */
+    fun onTrackPlay(index: Int) {
+        ensureEngineRunning()
+        engine?.playTrack(index)
+    }
+
+    /** Stop just this track. */
+    fun onTrackStop(index: Int) {
+        engine?.stopTrack(index)
+    }
+
+    /** RC-505 All Start: start every track that holds content, from the top. */
+    fun onPlayAll() {
+        ensureEngineRunning()
+        engine?.playAll()
+    }
+
+    /** RC-505 All Stop: stop every track. */
+    fun onStopAll() {
+        engine?.stopAll()
     }
 
     fun onMuteToggle(index: Int) = updateAndApplyMutes { t ->
