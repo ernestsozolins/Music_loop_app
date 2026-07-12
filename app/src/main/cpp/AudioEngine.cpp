@@ -1157,7 +1157,11 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
     // Monitoring + click only until the next downbeat. The metronome
     // renders after this function; its beat state here is from the previous
     // callback, so recording begins within one callback of the downbeat.
-    if (mMetronome.beatCount() > mCountInStartBeat && mMetronome.beatInBar() == 0) {
+    // If the click was switched off mid-count-in the beat counter freezes,
+    // so fall through to recording immediately rather than soft-locking.
+    const bool downbeat =
+        mMetronome.beatCount() > mCountInStartBeat && mMetronome.beatInBar() == 0;
+    if (downbeat || !mMetronome.isActive()) {
       mMasterRecordPos = 0;
       setPlayhead(0);
       mState.store(EngineState::RecordingMaster, std::memory_order_relaxed);

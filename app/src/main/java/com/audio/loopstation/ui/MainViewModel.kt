@@ -57,7 +57,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val isSelected: Boolean = false,
         val muted: Boolean = false,
         val soloed: Boolean = false,
-        val volume: Float = 1.0f,  // 0..1, mapped 1:1 onto engine gain
+        // Fader position 0..1 through the dB taper; UNITY_FADER (0.8) = 0 dB,
+        // matching the engine's unity default so untouched tracks play flat.
+        val volume: Float = 0.8f,
         val pan: Float = 0.0f,     // -1..1 balance
     )
 
