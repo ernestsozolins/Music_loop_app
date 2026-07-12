@@ -197,6 +197,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 onPanChange = { viewModel.onPanChange(track.index, it) },
                 onClear = { viewModel.onClearTrack(track.index) },
                 onTrim = { trimTarget = track.index },
+                onNudge = { delta -> viewModel.onNudgeTrack(track.index, delta) },
             )
         }
         val fxPanel: @Composable () -> Unit = {

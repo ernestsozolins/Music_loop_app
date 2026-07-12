@@ -474,6 +474,26 @@ class AudioEngine private constructor(private var handle: Long) {
     fun setTrackPan(track: Int, pan: Float) { if (handle != 0L) nativeSetTrackPan(handle, track, pan) }
     fun setTrackMuted(track: Int, muted: Boolean) { if (handle != 0L) nativeSetTrackMuted(handle, track, muted) }
 
+    /** Slide a track's start time by [millis] (signed) — instant, glitch-free. */
+    fun nudgeTrack(track: Int, millis: Int) {
+        val h = handle
+        val rate = sampleRate
+        if (h == 0L || rate <= 0) return
+        val cur = nativeGetTrackShift(h, track)
+        nativeSetTrackShift(h, track, cur + (millis.toLong() * rate / 1000L).toInt())
+    }
+
+    /** Reset a track's start-shift to zero. */
+    fun resetTrackShift(track: Int) { if (handle != 0L) nativeSetTrackShift(handle, track, 0) }
+
+    /** Current start-shift in milliseconds (signed). */
+    fun trackShiftMillis(track: Int): Int {
+        val h = handle
+        val rate = sampleRate
+        if (h == 0L || rate <= 0) return 0
+        return (nativeGetTrackShift(h, track).toLong() * 1000L / rate).toInt()
+    }
+
     /** Bit t = track t has content, bit (t+16) = track t is clearing. */
     val trackContentMask: Int
         get() = if (handle != 0L) nativeGetTrackContentMask(handle) else 0
@@ -721,6 +741,8 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeSetTrackGain(handle: Long, track: Int, gain: Float)
     private external fun nativeSetTrackPan(handle: Long, track: Int, pan: Float)
     private external fun nativeSetTrackMuted(handle: Long, track: Int, muted: Boolean)
+    private external fun nativeSetTrackShift(handle: Long, track: Int, frames: Int)
+    private external fun nativeGetTrackShift(handle: Long, track: Int): Int
     private external fun nativeGetTrackContentMask(handle: Long): Int
     private external fun nativeSetMonitorGain(handle: Long, gain: Float)
     private external fun nativeSetRecordOffsetFrames(handle: Long, frames: Int)

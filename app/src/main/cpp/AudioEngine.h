@@ -335,6 +335,10 @@ class AudioEngine {
   // material). Ignored when the engine runs mono.
   void setTrackPan(int32_t track, float pan);   // -1..1
   void setTrackMuted(int32_t track, bool muted);
+  // Slide a track's start time within the loop by `frames` (signed) with no
+  // data move — instant, glitch-free, safe to nudge live. Wraps circularly.
+  void setTrackShiftFrames(int32_t track, int32_t frames);
+  int32_t trackShiftFrames(int32_t track) const;
   void setMonitorGain(float gain);              // live input passthrough level, 0..2
   // Round-trip compensation measured by the Phase-3 loopback calibration
   // tool: overdubs are written this many frames behind the playhead.
@@ -396,6 +400,7 @@ class AudioEngine {
     std::vector<float> data;  // maxLoopFrames * channels, pre-touched
     std::atomic<float> gain{1.0f};
     std::atomic<float> pan{0.0f};
+    std::atomic<int32_t> playOffset{0};  // start-shift in frames (signed)
     std::atomic<bool> muted{false};
     std::atomic<bool> hasContent{false};
     std::atomic<bool> clearing{false};

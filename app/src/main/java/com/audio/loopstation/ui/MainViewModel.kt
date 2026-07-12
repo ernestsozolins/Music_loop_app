@@ -63,6 +63,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // matching the engine's unity default so untouched tracks play flat.
         val volume: Float = 0.8f,
         val pan: Float = 0.0f,     // -1..1 balance
+        val shiftMs: Int = 0,      // start-shift, signed ms
     )
 
     // NOTE: the playhead position deliberately does NOT live here. It
@@ -566,6 +567,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val p = pan.coerceIn(-1f, 1f)
         engine?.setTrackPan(index, p) ?: return
         _tracks.update { list -> list.map { if (it.index == index) it.copy(pan = p) else it } }
+    }
+
+    /** Nudge a track's start earlier/later by [deltaMs] — instant, live-safe. */
+    fun onNudgeTrack(index: Int, deltaMs: Int) {
+        val engine = this.engine ?: return
+        engine.nudgeTrack(index, deltaMs)
+        val ms = engine.trackShiftMillis(index)
+        _tracks.update { list -> list.map { if (it.index == index) it.copy(shiftMs = ms) else it } }
+    }
+
+    fun onResetTrackShift(index: Int) {
+        val engine = this.engine ?: return
+        engine.resetTrackShift(index)
+        _tracks.update { list -> list.map { if (it.index == index) it.copy(shiftMs = 0) else it } }
     }
 
     fun onClearTrack(index: Int) {

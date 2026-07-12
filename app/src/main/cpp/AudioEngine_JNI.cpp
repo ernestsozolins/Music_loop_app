@@ -552,6 +552,17 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetTrackMute
   if (AudioEngine* engine = fromHandle(handle)) engine->setTrackMuted(track, muted == JNI_TRUE);
 }
 
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetTrackShift(
+    JNIEnv*, jobject, jlong handle, jint track, jint frames) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setTrackShiftFrames(track, frames);
+}
+
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetTrackShift(
+    JNIEnv*, jobject, jlong handle, jint track) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->trackShiftFrames(track) : 0;
+}
+
 // Bit t = track t has content, bit (t+16) = track t is clearing.
 JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetTrackContentMask(
     JNIEnv*, jobject, jlong handle) {

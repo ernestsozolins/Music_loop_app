@@ -703,6 +703,16 @@ void AudioEngine::setTrackPan(int32_t track, float pan) {
   mTracks[track].pan.store(clampf(pan, -1.0f, 1.0f), std::memory_order_relaxed);
 }
 
+void AudioEngine::setTrackShiftFrames(int32_t track, int32_t frames) {
+  if (track < 0 || track >= mConfig.trackCount) return;
+  mTracks[track].playOffset.store(frames, std::memory_order_relaxed);
+}
+
+int32_t AudioEngine::trackShiftFrames(int32_t track) const {
+  if (track < 0 || track >= mConfig.trackCount) return 0;
+  return mTracks[track].playOffset.load(std::memory_order_relaxed);
+}
+
 void AudioEngine::setTrackMuted(int32_t track, bool muted) {
   if (track < 0 || track >= mConfig.trackCount) return;
   mTracks[track].muted.store(muted, std::memory_order_relaxed);
@@ -1198,6 +1208,7 @@ void AudioEngine::finalizeMasterOrQuantize() {
 
 void AudioEngine::beginTrackClear(LoopTrack& track) {
   track.clearCursor = 0;
+  track.playOffset.store(0, std::memory_order_relaxed);  // reset start-shift
   track.clearing.store(true, std::memory_order_relaxed);
 }
 
@@ -1278,6 +1289,7 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
     const float* srcs[kMaxTracks];
     float gainL[kMaxTracks];
     float gainR[kMaxTracks];
+    int32_t rd[kMaxTracks];  // per-track read cursor (start-shift offset applied)
     int32_t active = 0;
     for (int32_t t = 0; t < mConfig.trackCount; ++t) {
       LoopTrack& track = mTracks[t];
@@ -1291,6 +1303,11 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
       const float pan = (ch == 2) ? track.pan.load(std::memory_order_relaxed) : 0.0f;
       gainL[active] = g * (pan > 0.0f ? 1.0f - pan : 1.0f);
       gainR[active] = g * (pan < 0.0f ? 1.0f + pan : 1.0f);
+      // Per-track start shift: read this track from (playhead + offset),
+      // wrapped into the loop, so its timing slides without moving data.
+      int32_t off = track.playOffset.load(std::memory_order_relaxed) % mLoopLen;
+      if (off < 0) off += mLoopLen;
+      rd[active] = (mPlayhead + off) % mLoopLen;
       ++active;
     }
 
@@ -1310,9 +1327,10 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
     for (int32_t f = 0; f < frames; ++f) {
       float* o = out + static_cast<size_t>(f) * ch;
       for (int32_t t = 0; t < active; ++t) {
-        const float* s = srcs[t] + static_cast<size_t>(ph) * ch;
+        const float* s = srcs[t] + static_cast<size_t>(rd[t]) * ch;
         o[0] += s[0] * gainL[t];
         if (ch == 2) o[1] += s[1] * gainR[t];
+        if (++rd[t] >= mLoopLen) rd[t] = 0;
       }
       if (odData != nullptr) {
         const float* inF = in + static_cast<size_t>(f) * ch;
