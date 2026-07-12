@@ -240,6 +240,7 @@ class AudioEngine {
   void pauseBackingTrack(int32_t slot);
   void closeBackingTrack(int32_t slot);
   void setBackingTrackGain(int32_t slot, float gain);
+  void setBackingTrackLoop(int32_t slot, bool loop);
   StreamState backingTrackState(int32_t slot) const { return mSpooler.streamState(slot); }
   int64_t backingTrackPositionFrames(int32_t slot) const {
     return mSpooler.streamPositionFrames(slot);

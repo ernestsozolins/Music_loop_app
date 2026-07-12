@@ -388,6 +388,15 @@ void DiskSpooler::pauseStream(int32_t slot) {
   if (!validSlot(slot)) return;
   // Immediate: the audio thread stops consuming from its next block on.
   mSlots[slot].playing.store(false, std::memory_order_release);
+  // Reflect the pause in the observable state so the UI can show a resume
+  // affordance. Ready means "prebuffered, waiting for playStream()", which
+  // is exactly a paused stream — playStream() resumes from the current
+  // position (no seek), because the read cursor lives in `consumed`. Only
+  // demote from Playing so a race with an EOF->Ended transition can't
+  // resurrect a finished stream.
+  auto expected = StreamState::Playing;
+  mSlots[slot].state.compare_exchange_strong(
+      expected, StreamState::Ready, std::memory_order_acq_rel);
 }
 
 void DiskSpooler::closeStream(int32_t slot) {
@@ -402,6 +411,16 @@ void DiskSpooler::setStreamGain(int32_t slot, float gain) {
   if (!validSlot(slot)) return;
   mSlots[slot].gain.store(gain < 0.0f ? 0.0f : (gain > 4.0f ? 4.0f : gain),
                           std::memory_order_relaxed);
+}
+
+void DiskSpooler::setStreamLoop(int32_t slot, bool loop) {
+  if (!validSlot(slot)) return;
+  // slot.loop is reader-thread-confined, so route the change through the
+  // command queue rather than writing it here. Takes effect at the next
+  // buffer wrap — no restart, no gap, safe to toggle while playing.
+  std::lock_guard<std::mutex> lock(mReaderMutex);
+  mReaderQueue.push_back({ReaderCommand::Type::SetLoop, slot, {}, loop});
+  mReaderCv.notify_all();
 }
 
 StreamState DiskSpooler::streamState(int32_t slot) const {
@@ -663,6 +682,13 @@ void DiskSpooler::readerHandleCommand(const ReaderCommand& cmd) {
       slot.length.store(0, std::memory_order_relaxed);
       slot.consumed.store(0, std::memory_order_relaxed);
       slot.state.store(StreamState::Empty, std::memory_order_release);
+      break;
+    }
+    case ReaderCommand::Type::SetLoop: {
+      slot.loop = cmd.loop;
+      // If a non-looping stream had already hit EOF, re-enabling loop lets
+      // the next top-up seek back to the start instead of ending.
+      if (slot.loop) slot.eof = false;
       break;
     }
   }

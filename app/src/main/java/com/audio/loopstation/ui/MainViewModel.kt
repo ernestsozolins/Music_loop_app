@@ -1,6 +1,8 @@
 package com.audio.loopstation.ui
 
 import android.app.Application
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.audio.loopstation.AudioDeviceOption
@@ -176,6 +178,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Device disconnect / restart notifications for snackbars. */
     private val _engineEvents = MutableSharedFlow<AudioEngine.EngineEvent>(extraBufferCapacity = 16)
     val engineEvents: SharedFlow<AudioEngine.EngineEvent> = _engineEvents.asSharedFlow()
+
+    /**
+     * Backing-track slots (pre-recorded material streamed from disk into the
+     * output mix — never recorded into loop tracks). One row per hardware
+     * slot; [gain] is a fader position on the same dB taper as track faders.
+     */
+    data class BackingTrackUiState(
+        val slot: Int,
+        val name: String = "",
+        val state: AudioEngine.BackingTrackState = AudioEngine.BackingTrackState.EMPTY,
+        val loop: Boolean = true,
+        val gain: Float = 0.8f,       // fader position; UNITY_FADER = 0 dB
+        val lengthMs: Int = 0,
+    ) {
+        val isLoaded: Boolean
+            get() = state != AudioEngine.BackingTrackState.EMPTY &&
+                state != AudioEngine.BackingTrackState.LOADING &&
+                state != AudioEngine.BackingTrackState.ERROR
+        val isPlaying: Boolean get() = state == AudioEngine.BackingTrackState.PLAYING
+        val isBusy: Boolean get() = state == AudioEngine.BackingTrackState.LOADING
+        val isError: Boolean get() = state == AudioEngine.BackingTrackState.ERROR
+    }
+
+    private val _backingTracks = MutableStateFlow(
+        List(AudioEngine.BACKING_STREAM_SLOTS) { BackingTrackUiState(slot = it) },
+    )
+    val backingTracks: StateFlow<List<BackingTrackUiState>> = _backingTracks.asStateFlow()
 
     // ------------------------------------------------------------------
     // Service connection (MainActivity's ServiceConnection calls these)
@@ -387,6 +416,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             prevContentBits = contentBits
             for (t in _tracks.value) {
                 if (changed and (1 shl t.index) != 0) refreshTrackWaveform(t.index)
+            }
+        }
+
+        // Backing-track slots advance on the reader thread (LOADING -> READY,
+        // PLAYING -> ENDED). Poll only when a slot is in use; the data-class
+        // equality dedup means an unchanged snapshot never reaches collectors,
+        // so this cannot recompose per frame.
+        if (_backingTracks.value.any { it.state != AudioEngine.BackingTrackState.EMPTY }) {
+            val rate = engine.sampleRate
+            _backingTracks.update { list ->
+                list.map { bt ->
+                    val st = engine.backingTrackState(bt.slot)
+                    val lenMs = if (rate > 0) {
+                        (engine.backingTrackLengthFrames(bt.slot) * 1000L / rate).toInt()
+                    } else {
+                        bt.lengthMs
+                    }
+                    if (st != bt.state || lenMs != bt.lengthMs) {
+                        bt.copy(state = st, lengthMs = lenMs)
+                    } else {
+                        bt
+                    }
+                }
             }
         }
 
@@ -667,6 +719,95 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    // ------------------------------------------------------------------
+    // Backing tracks (stream pre-recorded material into the output mix)
+    // ------------------------------------------------------------------
+
+    /**
+     * Loads a picked audio file into [slot]: copies the content:// stream to
+     * private storage (SAF URIs aren't openable by native code) on the IO
+     * dispatcher, then hands the path to the engine's reader thread. The slot
+     * flips to READY (or ERROR) via the meter poll once the reader finishes.
+     * Only float32 / PCM16 WAV is decoded; anything else lands on ERROR.
+     */
+    fun onLoadBackingTrack(slot: Int, uri: Uri) {
+        val engine = this.engine ?: return
+        val app = getApplication<Application>()
+        val name = queryDisplayName(uri) ?: "Slot ${slot + 1}"
+        // Optimistic LOADING so the row shows a spinner immediately.
+        _backingTracks.update { list ->
+            list.map { if (it.slot == slot) it.copy(name = name, state = AudioEngine.BackingTrackState.LOADING) else it }
+        }
+        val loop = _backingTracks.value[slot].loop
+        viewModelScope.launch(Dispatchers.IO) {
+            val dest = File(File(app.filesDir, "backing").apply { mkdirs() }, "slot_$slot.wav")
+            val copied = try {
+                app.contentResolver.openInputStream(uri)?.use { input ->
+                    dest.outputStream().use { input.copyTo(it) }
+                } != null
+            } catch (e: Exception) {
+                false
+            }
+            if (copied) {
+                engine.openBackingTrack(slot, dest.absolutePath, loop)  // async -> READY/ERROR
+            } else {
+                dest.delete()
+                _backingTracks.update { list ->
+                    list.map { if (it.slot == slot) it.copy(state = AudioEngine.BackingTrackState.ERROR) else it }
+                }
+            }
+        }
+    }
+
+    /** Play/pause the slot. Reopens the streams first if a Stop closed them. */
+    fun onToggleBackingPlay(slot: Int) {
+        val engine = this.engine ?: return
+        val bt = _backingTracks.value.getOrNull(slot) ?: return
+        if (bt.isPlaying) {
+            engine.pauseBackingTrack(slot)
+        } else if (bt.isLoaded) {
+            ensureEngineRunning()
+            engine.playBackingTrack(slot)
+        }
+    }
+
+    /** Toggle looping live (engine applies it at the next wrap — no restart). */
+    fun onToggleBackingLoop(slot: Int) {
+        val engine = this.engine ?: return
+        val bt = _backingTracks.value.getOrNull(slot) ?: return
+        val loop = !bt.loop
+        engine.setBackingTrackLoop(slot, loop)
+        _backingTracks.update { list -> list.map { if (it.slot == slot) it.copy(loop = loop) else it } }
+    }
+
+    fun onBackingGainChange(slot: Int, position: Float) {
+        val engine = this.engine ?: return
+        val v = position.coerceIn(0f, 1f)
+        engine.setBackingTrackGain(slot, faderToGain(v))  // shared dB taper
+        _backingTracks.update { list -> list.map { if (it.slot == slot) it.copy(gain = v) else it } }
+    }
+
+    /** Unload the slot and delete its cached copy. */
+    fun onRemoveBackingTrack(slot: Int) {
+        val engine = this.engine ?: return
+        engine.closeBackingTrack(slot)
+        viewModelScope.launch(Dispatchers.IO) {
+            File(File(getApplication<Application>().filesDir, "backing"), "slot_$slot.wav").delete()
+        }
+        _backingTracks.update { list ->
+            list.map { if (it.slot == slot) BackingTrackUiState(slot = slot, loop = it.loop, gain = it.gain) else it }
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String? =
+        try {
+            getApplication<Application>().contentResolver
+                .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        } catch (e: Exception) {
+            null
+        }
 
     // ------------------------------------------------------------------
     // Output (playback) device selection

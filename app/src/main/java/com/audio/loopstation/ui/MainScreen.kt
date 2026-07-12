@@ -1,8 +1,10 @@
 package com.audio.loopstation.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -183,6 +185,8 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
             )
         },
     ) { innerPadding ->
+        val backingTracks by viewModel.backingTracks.collectAsStateWithLifecycle()
+
         val trackRow: @Composable (MainViewModel.TrackUiState) -> Unit = { track ->
             TrackRow(
                 track = track,
@@ -200,6 +204,16 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 onNudge = { delta -> viewModel.onNudgeTrack(track.index, delta) },
             )
         }
+        val backingPanel: @Composable () -> Unit = {
+            BackingTrackPanel(
+                slots = backingTracks,
+                onLoad = viewModel::onLoadBackingTrack,
+                onTogglePlay = viewModel::onToggleBackingPlay,
+                onToggleLoop = viewModel::onToggleBackingLoop,
+                onGainChange = viewModel::onBackingGainChange,
+                onRemove = viewModel::onRemoveBackingTrack,
+            )
+        }
         val fxPanel: @Composable () -> Unit = {
             MonitorFxPanel(
                 reverb = reverb,
@@ -212,35 +226,45 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
             )
         }
 
-        val smartButton: @Composable () -> Unit = {
-            SmartLoopButton(transport = transport, onTap = viewModel::onSmartLoopButton)
-        }
-
-        if (twoPane) {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(2),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding),
-                contentPadding = PaddingValues(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                item(key = "loop", span = { GridItemSpan(maxLineSpan) }) { smartButton() }
-                items(tracks, key = { it.index }) { trackRow(it) }
-                item(key = "fx", span = { GridItemSpan(maxLineSpan) }) { fxPanel() }
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding),
-                contentPadding = PaddingValues(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                item(key = "loop") { smartButton() }
-                items(tracks, key = { it.index }) { trackRow(it) }
-                item(key = "fx") { fxPanel() }
+        // The loop/overdub button is PINNED above the scrolling list so the
+        // one control you hit mid-take never scrolls off screen (the record/
+        // play/stop transport is likewise pinned in the Scaffold's bottomBar).
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+        ) {
+            SmartLoopButton(
+                transport = transport,
+                onTap = viewModel::onSmartLoopButton,
+                modifier = Modifier.padding(top = 12.dp),
+            )
+            if (twoPane) {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(2),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentPadding = PaddingValues(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    items(tracks, key = { it.index }) { trackRow(it) }
+                    item(key = "backing", span = { GridItemSpan(maxLineSpan) }) { backingPanel() }
+                    item(key = "fx", span = { GridItemSpan(maxLineSpan) }) { fxPanel() }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentPadding = PaddingValues(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    items(tracks, key = { it.index }) { trackRow(it) }
+                    item(key = "backing") { backingPanel() }
+                    item(key = "fx") { fxPanel() }
+                }
             }
         }
     }

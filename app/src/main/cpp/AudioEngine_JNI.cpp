@@ -392,6 +392,11 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetBackingTr
   if (AudioEngine* engine = fromHandle(handle)) engine->setBackingTrackGain(slot, gain);
 }
 
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetBackingTrackLoop(
+    JNIEnv*, jobject, jlong handle, jint slot, jboolean loop) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setBackingTrackLoop(slot, loop);
+}
+
 JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetBackingTrackState(
     JNIEnv*, jobject, jlong handle, jint slot) {
   AudioEngine* engine = fromHandle(handle);

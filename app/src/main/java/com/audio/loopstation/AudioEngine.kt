@@ -333,6 +333,11 @@ class AudioEngine private constructor(private var handle: Long) {
         if (handle != 0L) nativeSetBackingTrackGain(handle, slot, gain)
     }
 
+    /** Toggle looping live (no restart, applied at the next wrap). */
+    fun setBackingTrackLoop(slot: Int, loop: Boolean) {
+        if (handle != 0L) nativeSetBackingTrackLoop(handle, slot, loop)
+    }
+
     fun backingTrackState(slot: Int): BackingTrackState =
         BackingTrackState.fromNative(if (handle != 0L) nativeGetBackingTrackState(handle, slot) else 0)
 
@@ -733,6 +738,7 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativePauseBackingTrack(handle: Long, slot: Int)
     private external fun nativeCloseBackingTrack(handle: Long, slot: Int)
     private external fun nativeSetBackingTrackGain(handle: Long, slot: Int, gain: Float)
+    private external fun nativeSetBackingTrackLoop(handle: Long, slot: Int, loop: Boolean)
     private external fun nativeGetBackingTrackState(handle: Long, slot: Int): Int
     private external fun nativeGetBackingTrackPosition(handle: Long, slot: Int): Long
     private external fun nativeGetBackingTrackLength(handle: Long, slot: Int): Long

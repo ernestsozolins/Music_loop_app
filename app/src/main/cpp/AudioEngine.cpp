@@ -425,6 +425,10 @@ void AudioEngine::setBackingTrackGain(int32_t slot, float gain) {
   mSpooler.setStreamGain(slot, gain);
 }
 
+void AudioEngine::setBackingTrackLoop(int32_t slot, bool loop) {
+  mSpooler.setStreamLoop(slot, loop);
+}
+
 // ---------------------------------------------------------------------------
 // Session finalization & stem export (control / worker threads)
 // ---------------------------------------------------------------------------

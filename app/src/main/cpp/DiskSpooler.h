@@ -92,6 +92,7 @@ class DiskSpooler {
   void pauseStream(int32_t slot);  // immediate (atomic gate)
   void closeStream(int32_t slot);  // async -> Empty
   void setStreamGain(int32_t slot, float gain);
+  void setStreamLoop(int32_t slot, bool loop);  // async; applied on next wrap
   StreamState streamState(int32_t slot) const;
   int64_t streamPositionFrames(int32_t slot) const;  // position within the file
   int64_t streamLengthFrames(int32_t slot) const;
@@ -122,7 +123,7 @@ class DiskSpooler {
   };
 
   struct ReaderCommand {
-    enum class Type : uint8_t { Open, Play, Close };
+    enum class Type : uint8_t { Open, Play, Close, SetLoop };
     Type type;
     int32_t slot = 0;
     std::string path;
