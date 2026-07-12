@@ -379,10 +379,31 @@ void AudioEngine::pushCommand(const Command& cmd) {
 void AudioEngine::toggleRecord() { pushCommand({CommandType::ToggleRecord, 0}); }
 void AudioEngine::startRecording() { pushCommand({CommandType::RecordStart, 0}); }
 void AudioEngine::stopRecording() { pushCommand({CommandType::RecordStop, 0}); }
-void AudioEngine::play() { pushCommand({CommandType::Play, 0}); }
-void AudioEngine::stopPlayback() { pushCommand({CommandType::Stop, 0}); }
+void AudioEngine::play() { pushCommand({CommandType::PlayAll, 0}); }
+void AudioEngine::stopPlayback() { pushCommand({CommandType::StopAll, 0}); }
 void AudioEngine::clearAll() { pushCommand({CommandType::ClearAll, 0}); }
 void AudioEngine::resetLoopForRestore() { pushCommand({CommandType::ResetForRestore, 0}); }
+
+// ----- Per-track transport (control thread -> audio thread) -----
+void AudioEngine::recordTrack(int32_t track) {
+  pushCommand({CommandType::RecordTrack, clampTrackIndex(track)});
+}
+void AudioEngine::playTrack(int32_t track) {
+  pushCommand({CommandType::PlayTrack, clampTrackIndex(track)});
+}
+void AudioEngine::stopTrack(int32_t track) {
+  pushCommand({CommandType::StopTrack, clampTrackIndex(track)});
+}
+void AudioEngine::playAll() { pushCommand({CommandType::PlayAll, 0}); }
+void AudioEngine::stopAll() { pushCommand({CommandType::StopAll, 0}); }
+
+TrackTransport AudioEngine::trackTransport(int32_t track) const {
+  return static_cast<TrackTransport>(
+      mTracks[clampTrackIndex(track)].transport.load(std::memory_order_relaxed));
+}
+int32_t AudioEngine::trackPositionFrames(int32_t track) const {
+  return mTracks[clampTrackIndex(track)].posFrames.load(std::memory_order_relaxed);
+}
 
 void AudioEngine::setMetronomeState(bool active, float bpm, int32_t beatsPerMeasure) {
   mMetronome.setState(active, bpm, beatsPerMeasure);
@@ -745,6 +766,7 @@ TrackState AudioEngine::trackState(int32_t track) const {
   s.muted = t.muted.load(std::memory_order_relaxed);
   s.hasContent = t.hasContent.load(std::memory_order_relaxed);
   s.clearing = t.clearing.load(std::memory_order_relaxed);
+  s.transport = t.transport.load(std::memory_order_relaxed);
   return s;
 }
 
@@ -1009,64 +1031,64 @@ void AudioEngine::applyCommand(const Command& cmd) {
   // While the export worker reads the track buffers — or the undo restore
   // rewrites one — anything that would write them (record-arm, clear) is
   // refused; playback/stop still work.
+  const bool writesTracks =
+      cmd.type == CommandType::ToggleRecord || cmd.type == CommandType::RecordStart ||
+      cmd.type == CommandType::RecordTrack || cmd.type == CommandType::ClearAll ||
+      cmd.type == CommandType::ClearTrack;
   if ((mExportActive.load(std::memory_order_acquire) ||
        mUndoActive.load(std::memory_order_acquire)) &&
-      (cmd.type == CommandType::ToggleRecord || cmd.type == CommandType::RecordStart ||
-       cmd.type == CommandType::ClearAll || cmd.type == CommandType::ClearTrack)) {
+      writesTracks) {
     return;
   }
 
   switch (cmd.type) {
-    case CommandType::ToggleRecord: {
-      if (st == EngineState::CountIn) {
-        mState.store(EngineState::Idle, std::memory_order_relaxed);  // cancel count-in
-      } else if (st == EngineState::RecordingMaster) {
-        finalizeMasterOrQuantize();
-      } else if (st == EngineState::Overdubbing) {
-        mState.store(EngineState::Playing, std::memory_order_relaxed);
-      } else {
-        armRecording(st);
-      }
+    // ---- Legacy transport (operate on the selected track / all tracks) ----
+    case CommandType::ToggleRecord:
+      recordToggleTrack(clampTrackIndex(mSelectedTrack.load(std::memory_order_relaxed)));
       break;
-    }
     case CommandType::RecordStart: {
-      // Idempotent: ignored if a pass (or its count-in) is already running.
-      if (st != EngineState::RecordingMaster && st != EngineState::Overdubbing &&
-          st != EngineState::CountIn) {
-        armRecording(st);
-      }
+      const int32_t t = clampTrackIndex(mSelectedTrack.load(std::memory_order_relaxed));
+      const uint8_t tp = mTracks[t].transport.load(std::memory_order_relaxed);
+      const bool recording = tp == static_cast<uint8_t>(TrackTransport::Recording) ||
+          tp == static_cast<uint8_t>(TrackTransport::Overdubbing) ||
+          (st == EngineState::CountIn && mCountInTrack == t);
+      if (!recording) armRecordTrack(t);
       break;
     }
-    case CommandType::RecordStop: {
-      if (st == EngineState::CountIn) {
-        mState.store(EngineState::Idle, std::memory_order_relaxed);  // cancel count-in
-      } else if (st == EngineState::RecordingMaster) {
-        finalizeMasterOrQuantize();
-      } else if (st == EngineState::Overdubbing) {
-        mState.store(EngineState::Playing, std::memory_order_relaxed);
-      }
+    case CommandType::RecordStop:
+      recordStopTrack(clampTrackIndex(mSelectedTrack.load(std::memory_order_relaxed)));
       break;
-    }
-    case CommandType::Play: {
-      if (mLoopLen > 0) {
-        setPlayhead(0);
-        mState.store(EngineState::Playing, std::memory_order_relaxed);
-      }
+
+    // ---- Per-track transport (RC-505 model) ----
+    case CommandType::RecordTrack:
+      recordToggleTrack(clampTrackIndex(cmd.intArg));
       break;
-    }
-    case CommandType::Stop: {
+    case CommandType::PlayTrack:
+      startTrackPlaying(clampTrackIndex(cmd.intArg));
+      break;
+    case CommandType::StopTrack:
+      stopTrackInternal(clampTrackIndex(cmd.intArg));
+      break;
+    case CommandType::Play:      // legacy alias
+    case CommandType::PlayAll:
+      for (int32_t t = 0; t < mConfig.trackCount; ++t) startTrackPlaying(t);
+      break;
+    case CommandType::Stop:      // legacy alias
+    case CommandType::StopAll: {
       if (st == EngineState::RecordingMaster || st == EngineState::CountIn) {
-        // Cancel the take; nothing usable was committed.
         mMasterRecordPos = 0;
         mMasterStopAt = 0;
         setPlayhead(0);
+        mTracks[mCountInTrack].transport.store(
+            static_cast<uint8_t>(TrackTransport::Empty), std::memory_order_relaxed);
+        mTracks[mOverdubTrack].transport.store(
+            static_cast<uint8_t>(TrackTransport::Empty), std::memory_order_relaxed);
         mState.store(EngineState::Idle, std::memory_order_relaxed);
-      } else {
-        mState.store(mLoopLen > 0 ? EngineState::Stopped : EngineState::Idle,
-                     std::memory_order_relaxed);
       }
+      for (int32_t t = 0; t < mConfig.trackCount; ++t) stopTrackInternal(t);
       break;
     }
+
     case CommandType::ClearAll: {
       mState.store(EngineState::Idle, std::memory_order_relaxed);
       setLoopLength(0);
@@ -1075,23 +1097,40 @@ void AudioEngine::applyCommand(const Command& cmd) {
       mMasterStopAt = 0;
       for (int32_t t = 0; t < mConfig.trackCount; ++t) {
         mTracks[t].hasContent.store(false, std::memory_order_relaxed);
+        mTracks[t].transport.store(static_cast<uint8_t>(TrackTransport::Empty),
+                                   std::memory_order_relaxed);
+        mTracks[t].pos = 0;
+        mTracks[t].recPos = 0;
+        mTracks[t].posFrames.store(0, std::memory_order_relaxed);
         beginTrackClear(mTracks[t]);
       }
       break;
     }
     case CommandType::ClearTrack: {
       const int32_t track = clampTrackIndex(cmd.intArg);
-      if (st == EngineState::Overdubbing && track == mOverdubTrack) {
-        mState.store(EngineState::Playing, std::memory_order_relaxed);
+      LoopTrack& tr = mTracks[track];
+      tr.hasContent.store(false, std::memory_order_relaxed);
+      tr.transport.store(static_cast<uint8_t>(TrackTransport::Empty),
+                         std::memory_order_relaxed);
+      tr.pos = 0;
+      tr.recPos = 0;
+      tr.posFrames.store(0, std::memory_order_relaxed);
+      beginTrackClear(tr);
+      // If nothing holds content any more, drop the master loop so the next
+      // recording redefines the length.
+      bool anyContent = false;
+      for (int32_t t = 0; t < mConfig.trackCount; ++t) {
+        if (mTracks[t].hasContent.load(std::memory_order_relaxed)) { anyContent = true; break; }
       }
-      mTracks[track].hasContent.store(false, std::memory_order_relaxed);
-      beginTrackClear(mTracks[track]);
+      if (!anyContent) { setLoopLength(0); setPlayhead(0); }
+      updateGlobalState();
       break;
     }
     case CommandType::CalibrateStart: {
       // Preconditions: transport quiet and no capture running (the ping
       // must not compete with programme audio or land in a take).
-      const bool transportQuiet = (st == EngineState::Idle || st == EngineState::Stopped);
+      const bool transportQuiet = !anyTrackBusy() && st != EngineState::RecordingMaster &&
+          st != EngineState::CountIn;
       if (!transportQuiet || mSpooler.isCapturing()) {
         mCalibrator.markFailed();
         break;
@@ -1105,16 +1144,21 @@ void AudioEngine::applyCommand(const Command& cmd) {
     }
     case CommandType::UndoMute: {
       const int32_t track = clampTrackIndex(cmd.intArg);
-      if (track == mOverdubTrack) {
-        if (st == EngineState::Overdubbing) {
-          mState.store(EngineState::Playing, std::memory_order_relaxed);
-        } else if (st == EngineState::RecordingMaster) {
-          mMasterRecordPos = 0;
-          setPlayhead(0);
-          mState.store(EngineState::Idle, std::memory_order_relaxed);
-        }
+      const uint8_t tp = mTracks[track].transport.load(std::memory_order_relaxed);
+      if (st == EngineState::CountIn && mCountInTrack == track) {
+        mMasterRecordPos = 0;
+        setPlayhead(0);
+        mState.store(EngineState::Idle, std::memory_order_relaxed);
+      } else if (tp == static_cast<uint8_t>(TrackTransport::Recording) && mLoopLen == 0) {
+        mMasterRecordPos = 0;
+        setPlayhead(0);
+        mState.store(EngineState::Idle, std::memory_order_relaxed);
       }
-      mTracks[track].hasContent.store(false, std::memory_order_relaxed);
+      if (tp == static_cast<uint8_t>(TrackTransport::Overdubbing)) {
+        mTracks[track].transport.store(static_cast<uint8_t>(TrackTransport::Playing),
+                                       std::memory_order_relaxed);
+      }
+      mTracks[track].hasContent.store(false, std::memory_order_relaxed);  // mixer stops reading
       break;
     }
     case CommandType::UndoCommit: {
@@ -1131,6 +1175,11 @@ void AudioEngine::applyCommand(const Command& cmd) {
       mMasterStopAt = 0;
       for (int32_t t = 0; t < mConfig.trackCount; ++t) {
         mTracks[t].hasContent.store(false, std::memory_order_relaxed);
+        mTracks[t].transport.store(static_cast<uint8_t>(TrackTransport::Empty),
+                                   std::memory_order_relaxed);
+        mTracks[t].pos = 0;
+        mTracks[t].recPos = 0;
+        mTracks[t].posFrames.store(0, std::memory_order_relaxed);
       }
       break;
     }
@@ -1139,46 +1188,188 @@ void AudioEngine::applyCommand(const Command& cmd) {
       // are ordered by the command queue's release/acquire pair).
       setLoopLength(mRestoreLoopLen);
       setPlayhead(0);
+      int32_t firstContent = -1;
       for (int32_t t = 0; t < mConfig.trackCount; ++t) {
         if (mRestoreMask & (1u << t)) {
           mTracks[t].hasContent.store(true, std::memory_order_relaxed);
+          mTracks[t].pos = 0;
+          mTracks[t].posFrames.store(0, std::memory_order_relaxed);
+          mTracks[t].transport.store(static_cast<uint8_t>(TrackTransport::Stopped),
+                                     std::memory_order_relaxed);  // ready; user presses play
+          if (firstContent < 0) firstContent = t;
         }
       }
+      if (firstContent >= 0) mMasterTrack = firstContent;
       mState.store(mRestoreLoopLen > 0 ? EngineState::Stopped : EngineState::Idle,
-                   std::memory_order_relaxed);  // loop ready; user presses play
+                   std::memory_order_relaxed);
       mRestoreActive.store(false, std::memory_order_release);
       mRestoreState.store(kRestoreDone, std::memory_order_release);
       break;
     }
   }
+
+  // Refresh the coarse global state (used by the metronome sync + gates) from
+  // the per-track states, except while a master take / count-in is pending.
+  updateGlobalState();
 }
 
-// Idle / Playing / Stopped -> start recording into the selected track: the
-// first-ever recording defines the master loop length; afterwards it's an
-// overdub pass (from Stopped, playback restarts at the top).
-void AudioEngine::armRecording(EngineState current) {
-  const int32_t track = clampTrackIndex(mSelectedTrack.load(std::memory_order_relaxed));
+// ----- Per-track transport helpers (audio thread) --------------------------
+
+// RC-505 one-button behaviour: a fresh track records; a recording track
+// closes; an overdubbing track drops back to plain playback; a stopped/playing
+// track with content starts an overdub pass.
+void AudioEngine::recordToggleTrack(int32_t track) {
+  const EngineState st = mState.load(std::memory_order_relaxed);
+  if (st == EngineState::CountIn && mCountInTrack == track) {
+    mState.store(EngineState::Idle, std::memory_order_relaxed);  // cancel count-in
+    mTracks[track].transport.store(static_cast<uint8_t>(TrackTransport::Empty),
+                                   std::memory_order_relaxed);
+    return;
+  }
+  const uint8_t tp = mTracks[track].transport.load(std::memory_order_relaxed);
+  if (tp == static_cast<uint8_t>(TrackTransport::Recording)) {
+    if (mLoopLen == 0) finalizeMasterOrQuantize(); else finalizeTrackRecord(track);
+  } else if (tp == static_cast<uint8_t>(TrackTransport::Overdubbing)) {
+    mTracks[track].transport.store(static_cast<uint8_t>(TrackTransport::Playing),
+                                   std::memory_order_relaxed);
+  } else {
+    armRecordTrack(track);
+  }
+}
+
+// Stop-recording semantics only (never starts a pass): closes a record/overdub.
+void AudioEngine::recordStopTrack(int32_t track) {
+  const EngineState st = mState.load(std::memory_order_relaxed);
+  if (st == EngineState::CountIn && mCountInTrack == track) {
+    mState.store(EngineState::Idle, std::memory_order_relaxed);
+    mTracks[track].transport.store(static_cast<uint8_t>(TrackTransport::Empty),
+                                   std::memory_order_relaxed);
+    return;
+  }
+  const uint8_t tp = mTracks[track].transport.load(std::memory_order_relaxed);
+  if (tp == static_cast<uint8_t>(TrackTransport::Recording)) {
+    if (mLoopLen == 0) finalizeMasterOrQuantize(); else finalizeTrackRecord(track);
+  } else if (tp == static_cast<uint8_t>(TrackTransport::Overdubbing)) {
+    mTracks[track].transport.store(static_cast<uint8_t>(TrackTransport::Playing),
+                                   std::memory_order_relaxed);
+  }
+}
+
+// (Re)start a track from its beginning; no-op on an empty/clearing track.
+void AudioEngine::startTrackPlaying(int32_t track) {
+  LoopTrack& tr = mTracks[track];
+  if (!tr.hasContent.load(std::memory_order_relaxed) ||
+      tr.clearing.load(std::memory_order_relaxed)) {
+    return;
+  }
+  tr.pos = 0;
+  tr.posFrames.store(0, std::memory_order_relaxed);
+  tr.transport.store(static_cast<uint8_t>(TrackTransport::Playing), std::memory_order_relaxed);
+}
+
+// Stop just this track. A fresh record pass is cancelled; content is retained.
+void AudioEngine::stopTrackInternal(int32_t track) {
+  LoopTrack& tr = mTracks[track];
+  const uint8_t tp = tr.transport.load(std::memory_order_relaxed);
+  if (tp == static_cast<uint8_t>(TrackTransport::Recording)) {
+    if (mLoopLen == 0) {  // cancel the master take in progress
+      mMasterRecordPos = 0;
+      mMasterStopAt = 0;
+      setPlayhead(0);
+    } else {
+      tr.recPos = 0;  // discard the partial fixed-length take
+    }
+  }
+  tr.transport.store(tr.hasContent.load(std::memory_order_relaxed)
+                         ? static_cast<uint8_t>(TrackTransport::Stopped)
+                         : static_cast<uint8_t>(TrackTransport::Empty),
+                     std::memory_order_relaxed);
+}
+
+bool AudioEngine::anyTrackBusy() const {
+  for (int32_t t = 0; t < mConfig.trackCount; ++t) {
+    const uint8_t tp = mTracks[t].transport.load(std::memory_order_relaxed);
+    if (tp != static_cast<uint8_t>(TrackTransport::Empty) &&
+        tp != static_cast<uint8_t>(TrackTransport::Stopped)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Coarse mState for the metronome sync + gates. Leaves the transient master-
+// take / count-in states alone (they are driven explicitly).
+void AudioEngine::updateGlobalState() {
+  const EngineState cur = mState.load(std::memory_order_relaxed);
+  if (cur == EngineState::RecordingMaster || cur == EngineState::CountIn) return;
+  bool anyOverdub = false, anyPlaying = false;
+  for (int32_t t = 0; t < mConfig.trackCount; ++t) {
+    const uint8_t tp = mTracks[t].transport.load(std::memory_order_relaxed);
+    if (tp == static_cast<uint8_t>(TrackTransport::Overdubbing)) anyOverdub = true;
+    else if (tp == static_cast<uint8_t>(TrackTransport::Playing)) anyPlaying = true;
+  }
+  EngineState ns;
+  if (anyOverdub) ns = EngineState::Overdubbing;
+  else if (anyPlaying) ns = EngineState::Playing;
+  else if (mLoopLen > 0) ns = EngineState::Stopped;
+  else ns = EngineState::Idle;
+  mState.store(ns, std::memory_order_relaxed);
+}
+
+// Start record/overdub on a specific track. The first-ever recording defines
+// the shared master loop length; while a master exists, an empty track records
+// a fresh one-loop take and a track with content starts an overdub pass.
+void AudioEngine::armRecordTrack(int32_t track) {
   LoopTrack& t = mTracks[track];
   if (t.clearing.load(std::memory_order_relaxed)) return;  // not armable mid-clear
   mOverdubTrack = track;
   if (mLoopLen == 0) {
     // No master loop yet — this recording defines the loop length.
+    mMasterTrack = track;
     mMasterRecordPos = 0;
     mMasterStopAt = 0;
+    t.recPos = 0;
+    t.pos = 0;
     setPlayhead(0);
     if (mCountInEnabled.load(std::memory_order_relaxed) && mMetronome.isActive()) {
       // Wait for the next downbeat before capturing, so the loop starts on
       // the bar. The intervening clicks are the count-in.
+      mCountInTrack = track;
       mCountInStartBeat = mMetronome.beatCount();
       mState.store(EngineState::CountIn, std::memory_order_relaxed);
     } else {
+      t.transport.store(static_cast<uint8_t>(TrackTransport::Recording),
+                        std::memory_order_relaxed);
       mState.store(EngineState::RecordingMaster, std::memory_order_relaxed);
     }
+  } else if (t.hasContent.load(std::memory_order_relaxed)) {
+    // Overdub existing content: make sure it is playing, then sum input.
+    const uint8_t tp = t.transport.load(std::memory_order_relaxed);
+    if (tp == static_cast<uint8_t>(TrackTransport::Stopped) ||
+        tp == static_cast<uint8_t>(TrackTransport::Empty)) {
+      t.pos = 0;  // start from the top
+    }
+    t.transport.store(static_cast<uint8_t>(TrackTransport::Overdubbing),
+                      std::memory_order_relaxed);
   } else {
-    if (current == EngineState::Stopped) setPlayhead(0);
-    t.hasContent.store(true, std::memory_order_relaxed);
-    mState.store(EngineState::Overdubbing, std::memory_order_relaxed);
+    // Fresh fixed-length take: capture exactly one master loop, then play.
+    t.recPos = 0;
+    t.pos = 0;
+    t.transport.store(static_cast<uint8_t>(TrackTransport::Recording),
+                      std::memory_order_relaxed);
   }
+}
+
+// Close a fresh FIXED-length take (a track recording one master loop while a
+// master already exists). The master-defining take goes through
+// finalizeMasterLoop() instead.
+void AudioEngine::finalizeTrackRecord(int32_t track) {
+  LoopTrack& t = mTracks[track];
+  t.hasContent.store(true, std::memory_order_relaxed);
+  t.recPos = 0;
+  t.pos = 0;
+  t.posFrames.store(0, std::memory_order_relaxed);
+  t.transport.store(static_cast<uint8_t>(TrackTransport::Playing), std::memory_order_relaxed);
 }
 
 // Whole-bar length in frames at the current tempo, or 0 if the click is off.
@@ -1236,12 +1427,18 @@ void AudioEngine::processPendingClears() {
 }
 
 void AudioEngine::finalizeMasterLoop() {
+  LoopTrack& t = mTracks[mOverdubTrack];
   if (mMasterRecordPos > 0) {
     setLoopLength(mMasterRecordPos);
-    mTracks[mOverdubTrack].hasContent.store(true, std::memory_order_relaxed);
+    t.hasContent.store(true, std::memory_order_relaxed);
+    t.pos = 0;
+    t.posFrames.store(0, std::memory_order_relaxed);
+    t.transport.store(static_cast<uint8_t>(TrackTransport::Playing), std::memory_order_relaxed);
+    mMasterTrack = mOverdubTrack;
     setPlayhead(0);
     mState.store(EngineState::Playing, std::memory_order_relaxed);
   } else {
+    t.transport.store(static_cast<uint8_t>(TrackTransport::Empty), std::memory_order_relaxed);
     mState.store(EngineState::Idle, std::memory_order_relaxed);
   }
   mMasterRecordPos = 0;
@@ -1251,6 +1448,7 @@ void AudioEngine::finalizeMasterLoop() {
 void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
   const int32_t ch = mConfig.channelCount;
   const int32_t samples = frames * ch;
+  using TT = TrackTransport;
 
   // Base layer: live input monitoring.
   const float monitorGain = mMonitorGain.load(std::memory_order_relaxed);
@@ -1258,28 +1456,38 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
 
   const EngineState st = mState.load(std::memory_order_relaxed);
 
+  // ---- Count-in: hold until the next downbeat, then begin the master take.
   if (st == EngineState::CountIn) {
-    // Monitoring + click only until the next downbeat. The metronome
-    // renders after this function; its beat state here is from the previous
-    // callback, so recording begins within one callback of the downbeat.
-    // If the click was switched off mid-count-in the beat counter freezes,
-    // so fall through to recording immediately rather than soft-locking.
+    // The metronome renders after this function; its beat state here is from
+    // the previous callback, so recording begins within one callback of the
+    // downbeat. If the click was switched off mid-count-in the beat counter
+    // freezes, so fall through to recording rather than soft-locking.
     const bool downbeat =
         mMetronome.beatCount() > mCountInStartBeat && mMetronome.beatInBar() == 0;
     if (downbeat || !mMetronome.isActive()) {
+      mOverdubTrack = mCountInTrack;
+      mMasterTrack = mCountInTrack;
       mMasterRecordPos = 0;
       setPlayhead(0);
+      mTracks[mCountInTrack].pos = 0;
+      mTracks[mCountInTrack].transport.store(static_cast<uint8_t>(TT::Recording),
+                                             std::memory_order_relaxed);
       mState.store(EngineState::RecordingMaster, std::memory_order_relaxed);
     }
-  } else if (st == EngineState::RecordingMaster) {
+  }
+
+  // ---- Master take: the first recording defines the shared loop length. It
+  // captures into mOverdubTrack and grows mMasterRecordPos; it does not play.
+  if (mState.load(std::memory_order_relaxed) == EngineState::RecordingMaster && mLoopLen == 0) {
     LoopTrack& rec = mTracks[mOverdubTrack];
     int32_t cap = mMaxLoopFrames;
     if (mMasterStopAt > 0) cap = std::min(cap, mMasterStopAt);  // scheduled bar-line stop
     const int32_t n = std::min(frames, cap - mMasterRecordPos);
-    std::memcpy(&rec.data[static_cast<size_t>(mMasterRecordPos) * ch], in,
-                static_cast<size_t>(n) * ch * sizeof(float));
-    mMasterRecordPos += n;
-    // Publish record progress so the UI can show elapsed loop time.
+    if (n > 0) {
+      std::memcpy(&rec.data[static_cast<size_t>(mMasterRecordPos) * ch], in,
+                  static_cast<size_t>(n) * ch * sizeof(float));
+      mMasterRecordPos += n;
+    }
     mPlayheadFrames.store(mMasterRecordPos, std::memory_order_relaxed);
     if (mMasterStopAt > 0 && mMasterRecordPos >= mMasterStopAt) {
       mMasterStopAt = 0;
@@ -1287,17 +1495,46 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
     } else if (mMasterRecordPos >= mMaxLoopFrames) {
       finalizeMasterLoop();  // hit capacity: close the loop automatically
     }
-  } else if ((st == EngineState::Playing || st == EngineState::Overdubbing) && mLoopLen > 0) {
-    // Snapshot per-track parameters once per block, never per frame. Pan is
-    // a balance law: unity at center, attenuate the opposite side only.
+  }
+
+  // ---- With a master loop present: capture fixed-length takes AND play the
+  // rest, so a track can record while others loop (independent transports).
+  if (mLoopLen > 0) {
+    // (a) Fixed-length record captures: a track recording exactly one loop.
+    for (int32_t t = 0; t < mConfig.trackCount; ++t) {
+      LoopTrack& tr = mTracks[t];
+      if (tr.transport.load(std::memory_order_relaxed) != static_cast<uint8_t>(TT::Recording)) {
+        continue;
+      }
+      const int32_t n = std::min(frames, mLoopLen - tr.recPos);
+      if (n > 0) {
+        std::memcpy(&tr.data[static_cast<size_t>(tr.recPos) * ch], in,
+                    static_cast<size_t>(n) * ch * sizeof(float));
+        tr.recPos += n;
+      }
+      tr.posFrames.store(tr.recPos, std::memory_order_relaxed);
+      if (tr.recPos >= mLoopLen) finalizeTrackRecord(t);  // one loop captured
+    }
+
+    // (b) Playback + overdub mix. Each playing track advances its OWN
+    // playhead, so tracks can be started from the top independently.
     const float* srcs[kMaxTracks];
     float gainL[kMaxTracks];
     float gainR[kMaxTracks];
-    int32_t rd[kMaxTracks];  // per-track read cursor (start-shift offset applied)
+    int32_t rd[kMaxTracks];        // read cursor (start-shift applied)
+    int32_t posStart[kMaxTracks];  // track pos at block start (O(1) write-back)
+    int32_t trk[kMaxTracks];       // originating track index
+    float* odData[kMaxTracks];     // overdub write buffer (null if not dubbing)
+    int32_t odPos[kMaxTracks];     // overdub write cursor
     int32_t active = 0;
+    int32_t recOffset = mRecordOffset.load(std::memory_order_relaxed) % mLoopLen;
+    if (recOffset < 0) recOffset += mLoopLen;
     for (int32_t t = 0; t < mConfig.trackCount; ++t) {
       LoopTrack& track = mTracks[t];
-      if (!track.hasContent.load(std::memory_order_relaxed) ||
+      const uint8_t tp = track.transport.load(std::memory_order_relaxed);
+      const bool playing = tp == static_cast<uint8_t>(TT::Playing) ||
+                           tp == static_cast<uint8_t>(TT::Overdubbing);
+      if (!playing || !track.hasContent.load(std::memory_order_relaxed) ||
           track.muted.load(std::memory_order_relaxed) ||
           track.clearing.load(std::memory_order_relaxed)) {
         continue;
@@ -1307,44 +1544,56 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
       const float pan = (ch == 2) ? track.pan.load(std::memory_order_relaxed) : 0.0f;
       gainL[active] = g * (pan > 0.0f ? 1.0f - pan : 1.0f);
       gainR[active] = g * (pan < 0.0f ? 1.0f + pan : 1.0f);
-      // Per-track start shift: read this track from (playhead + offset),
-      // wrapped into the loop, so its timing slides without moving data.
       int32_t off = track.playOffset.load(std::memory_order_relaxed) % mLoopLen;
       if (off < 0) off += mLoopLen;
-      rd[active] = (mPlayhead + off) % mLoopLen;
+      posStart[active] = track.pos;
+      rd[active] = (track.pos + off) % mLoopLen;
+      trk[active] = t;
+      if (tp == static_cast<uint8_t>(TT::Overdubbing)) {
+        // Write the live input this many frames BEHIND the track's playhead so
+        // it lands where the performer heard the loop (calibrated round trip).
+        odData[active] = track.data.data();
+        int32_t op = track.pos - recOffset;
+        if (op < 0) op += mLoopLen;
+        odPos[active] = op;
+      } else {
+        odData[active] = nullptr;
+        odPos[active] = 0;
+      }
       ++active;
     }
 
-    // Overdub target: write the live input this many frames BEHIND the
-    // playhead so it lands where the performer actually heard the loop
-    // (round-trip latency measured by the Phase-3 calibration tool).
-    float* odData = nullptr;
-    int32_t odPos = 0;
-    if (st == EngineState::Overdubbing) {
-      odData = mTracks[mOverdubTrack].data.data();
-      const int32_t offset = mRecordOffset.load(std::memory_order_relaxed) % mLoopLen;
-      odPos = mPlayhead - offset;
-      if (odPos < 0) odPos += mLoopLen;
-    }
-
-    int32_t ph = mPlayhead;
     for (int32_t f = 0; f < frames; ++f) {
       float* o = out + static_cast<size_t>(f) * ch;
-      for (int32_t t = 0; t < active; ++t) {
-        const float* s = srcs[t] + static_cast<size_t>(rd[t]) * ch;
-        o[0] += s[0] * gainL[t];
-        if (ch == 2) o[1] += s[1] * gainR[t];
-        if (++rd[t] >= mLoopLen) rd[t] = 0;
+      const float* inF = in + static_cast<size_t>(f) * ch;
+      for (int32_t a = 0; a < active; ++a) {
+        const float* s = srcs[a] + static_cast<size_t>(rd[a]) * ch;
+        o[0] += s[0] * gainL[a];
+        if (ch == 2) o[1] += s[1] * gainR[a];
+        if (++rd[a] >= mLoopLen) rd[a] = 0;
+        if (odData[a] != nullptr) {
+          float* d = odData[a] + static_cast<size_t>(odPos[a]) * ch;
+          for (int32_t c = 0; c < ch; ++c) d[c] += inF[c];
+          if (++odPos[a] >= mLoopLen) odPos[a] = 0;
+        }
       }
-      if (odData != nullptr) {
-        const float* inF = in + static_cast<size_t>(f) * ch;
-        float* d = odData + static_cast<size_t>(odPos) * ch;
-        for (int32_t c = 0; c < ch; ++c) d[c] += inF[c];
-        if (++odPos >= mLoopLen) odPos = 0;
-      }
-      if (++ph >= mLoopLen) ph = 0;
     }
-    setPlayhead(ph);
+
+    // Advance each active track's playhead by exactly `frames` and publish it.
+    for (int32_t a = 0; a < active; ++a) {
+      int32_t np = posStart[a] + frames;
+      np %= mLoopLen;
+      mTracks[trk[a]].pos = np;
+      mTracks[trk[a]].posFrames.store(np, std::memory_order_relaxed);
+    }
+
+    // Master mirror: drive the global playhead line + metronome sync from the
+    // reference track while it is playing.
+    const uint8_t mtp = mTracks[mMasterTrack].transport.load(std::memory_order_relaxed);
+    if (mtp == static_cast<uint8_t>(TT::Playing) ||
+        mtp == static_cast<uint8_t>(TT::Overdubbing)) {
+      setPlayhead(mTracks[mMasterTrack].pos);
+    }
   }
 }
 

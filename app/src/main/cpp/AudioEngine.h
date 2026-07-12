@@ -81,6 +81,19 @@ enum class EngineState : uint8_t {
   CountIn,          // armed; master recording starts at the next downbeat
 };
 
+// Per-track transport (RC-505 model): each track is an independent loop
+// player with its own play/record/stop state and its own playhead. All tracks
+// share the master loop length (set by the first recorded track), so layers
+// stay the same length; a track's own `pos` lets it be (re)started from the
+// top independently of the others. Ordinals are mirrored in AudioEngine.kt.
+enum class TrackTransport : uint8_t {
+  Empty = 0,      // no audio
+  Recording = 1,  // capturing new content (master pass or fresh fixed-length)
+  Overdubbing = 2,// playing + summing live input onto existing content
+  Playing = 3,    // looping playback, contributing to the mix
+  Stopped = 4,    // has content, halted, silent in the mix
+};
+
 // One meter datum per output callback block. The UI drains these at ~60 Hz
 // and downsamples/aggregates however it likes for the waveform display.
 struct WaveformPoint {
@@ -100,6 +113,7 @@ struct TrackState {
   bool muted = false;
   bool hasContent = false;
   bool clearing = false;  // true while the amortized clear is still running
+  uint8_t transport = 0;  // TrackTransport
 };
 
 // ---------------------------------------------------------------------------
@@ -177,8 +191,23 @@ class AudioEngine {
   void toggleRecord();
   void startRecording();  // idempotent: no-op if already recording/overdubbing
   void stopRecording();   // closes the master loop or ends the overdub pass
-  void play();            // (re)start playback from the top of the loop
+  void play();            // (re)start playback from the top of the loop (all tracks)
   void stopPlayback();    // halt transport; cancels a master recording in progress
+
+  // ----- Per-track transport (RC-505 model; control thread) -----
+  // Each track is an independent loop player. recordTrack toggles a track
+  // between record/overdub and play; playTrack (re)starts a track from its
+  // start (frame 0); stopTrack halts just that track. playAll/stopAll trigger
+  // every track that holds content together. The first track recorded defines
+  // the shared loop length; later recordings capture exactly one loop length.
+  void recordTrack(int32_t track);  // toggle: arm/close record/overdub on track
+  void playTrack(int32_t track);    // (re)start this track from frame 0
+  void stopTrack(int32_t track);    // stop just this track
+  void playAll();                   // start every track with content from the top
+  void stopAll();                   // stop every track (and cancel a master take)
+  TrackTransport trackTransport(int32_t track) const;
+  int32_t trackPositionFrames(int32_t track) const;  // this track's playhead
+
   void clearAll();        // drop the loop and schedule all tracks for clearing
   void clearTrack(int32_t track);
   // Immediately drop loop state + all content flags WITHOUT wiping the track
@@ -383,6 +412,11 @@ class AudioEngine {
     RecordStop,
     Play,
     Stop,
+    RecordTrack,    // intArg = track: toggle record/overdub on that track
+    PlayTrack,      // intArg = track: (re)start that track from frame 0
+    StopTrack,      // intArg = track: stop just that track
+    PlayAll,        // start every track with content from the top
+    StopAll,        // stop every track (cancel a master take too)
     ClearAll,
     ClearTrack,
     CalibrateStart,
@@ -406,6 +440,13 @@ class AudioEngine {
     std::atomic<bool> hasContent{false};
     std::atomic<bool> clearing{false};
     int32_t clearCursor = 0;  // audio thread only
+    // Per-track transport (RC-505 model). `pos`/`recPos` are audio-thread
+    // owned; `transport`/`posFrames` are published mirrors for the UI. All
+    // tracks share the engine's master loop length (mLoopLen).
+    std::atomic<uint8_t> transport{static_cast<uint8_t>(TrackTransport::Empty)};
+    std::atomic<int32_t> posFrames{0};  // published playhead mirror
+    int32_t pos = 0;      // audio-thread playhead within the loop
+    int32_t recPos = 0;   // audio-thread record/capture cursor
   };
 
   // One callback object per stream; routes into the engine by direction.
@@ -445,7 +486,14 @@ class AudioEngine {
   // ----- Audio-thread helpers (realtime-safe) -----
   void drainCommands();
   void applyCommand(const Command& cmd);
-  void armRecording(EngineState current);
+  void armRecordTrack(int32_t track);      // start record/overdub on a track
+  void recordToggleTrack(int32_t track);   // one-button record/close/overdub
+  void recordStopTrack(int32_t track);     // close a record/overdub (never start)
+  void finalizeTrackRecord(int32_t track); // close a fresh fixed-length take
+  void startTrackPlaying(int32_t track);   // (re)start a track from frame 0
+  void stopTrackInternal(int32_t track);   // halt a track (audio thread)
+  void updateGlobalState();                // coarse mState from per-track states
+  bool anyTrackBusy() const;               // any track recording/playing/overdub
   void processPendingClears();
   void pullInput(float* dst, int32_t frames);
   void renderLooper(float* out, const float* in, int32_t frames);
@@ -483,10 +531,12 @@ class AudioEngine {
 
   // ----- Looper state: owned by the audio thread -----
   std::array<LoopTrack, kMaxTracks> mTracks;
-  int32_t mLoopLen = 0;         // audio-thread master copy
-  int32_t mPlayhead = 0;        // audio-thread master copy
+  int32_t mLoopLen = 0;         // audio-thread master loop length (shared)
+  int32_t mPlayhead = 0;        // audio-thread mirror of the master track's pos
   int32_t mMasterRecordPos = 0;
-  int32_t mOverdubTrack = 0;
+  int32_t mOverdubTrack = 0;    // track currently defining the master take
+  int32_t mMasterTrack = 0;     // reference track: drives mPlayhead + click sync
+  int32_t mCountInTrack = 0;    // track the pending count-in will start recording
   bool mPrimed = false;         // look-ahead cushion established
   int32_t mDeclickRemaining = 0;
 
