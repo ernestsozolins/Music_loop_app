@@ -287,6 +287,26 @@ void AudioEngine::closeStreams() {
   }
 }
 
+bool AudioEngine::onStreamError(oboe::Direction direction, oboe::Result error) {
+  // First line of disconnect protection. Runs on Oboe's non-realtime error
+  // thread BEFORE the stream is closed: the moment a USB mic or Bluetooth
+  // sink vanishes we park the transport (Stop command), abort any calibration
+  // in flight, stop disk writing (which finalizes the .wav header so the take
+  // on disk stays valid), and push a thread-safe event up to Kotlin. Returning
+  // false lets Oboe run its normal close sequence; the recovery restart then
+  // happens in onStreamErrorAfterClose().
+  if (error == oboe::Result::ErrorDisconnected) {
+    LOGW("%s stream disconnected", direction == oboe::Direction::Input ? "input" : "output");
+    pushCommand({CommandType::CalibrateCancel, 0});
+    pushCommand({CommandType::Stop, 0});
+    mSpooler.stopCapture();
+    fireEvent(direction == oboe::Direction::Input ? EventType::InputDisconnected
+                                                  : EventType::OutputDisconnected,
+              static_cast<int32_t>(error));
+  }
+  return false;
+}
+
 void AudioEngine::onStreamErrorAfterClose(oboe::AudioStream* stream, oboe::Result error) {
   // Runs on a non-realtime thread owned by Oboe/AAudio, so locking and
   // reopening streams here is legal (this is the pattern Oboe's own duplex
