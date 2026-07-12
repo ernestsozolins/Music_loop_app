@@ -51,6 +51,8 @@ class MainActivity : ComponentActivity() {
             // Reattach is seamless: the service-owned engine (and any loops
             // or in-flight recording) is exactly where we left it.
             viewModel.attachEngine(service.engine)
+            // Let transport intents reopen the streams (mic) after a Stop.
+            viewModel.requestEngineStart = { service.ensureEngineStarted() }
             maybeStartEngine()
         }
 
@@ -127,9 +129,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         midiPedal.stop()
-        // Persist the session on the way to the background so nothing is
-        // lost; the service keeps the process alive long enough to finish.
+        // Persist the session on the way out so nothing is lost.
         viewModel.autosaveIfNeeded()
+        if (isFinishing) {
+            // Genuinely leaving (back button / finish()): release the mic.
+            // A plain background (HOME) keeps the engine alive so a recording
+            // in progress isn't lost — that path leaves the service running.
+            recordingService?.stopSession()
+        }
         // Detach the UI. The service keeps the engine (and the recording)
         // alive on its own if it has promoted itself to the foreground.
         viewModel.detachEngine()

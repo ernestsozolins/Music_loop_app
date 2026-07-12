@@ -62,6 +62,7 @@ class MediaRecordingService : Service() {
     private var resumePlaybackOnGain = false
 
     private var engineStarted = false
+    private var released = false  // streams explicitly stopped (mic off) by Stop/exit
     private var isForeground = false
     private var lastState = AudioEngine.State.IDLE
 
@@ -85,10 +86,18 @@ class MediaRecordingService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            serviceScope.launch { stopTransportAndFinalize() }
+            // Notification "Stop": fully release the microphone, not just pause.
+            releaseAudio()
         }
         // Never auto-restart a recorder without user intent.
         return START_NOT_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // The user swiped the app away — release the mic and let the process go.
+        releaseAudio()
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
@@ -98,10 +107,38 @@ class MediaRecordingService : Service() {
         super.onDestroy()
     }
 
-    /** Called by the UI once RECORD_AUDIO is granted. Idempotent. */
+    /** Public entry for the Activity to release the mic on a finishing exit. */
+    fun stopSession() = releaseAudio()
+
+    /** Called by the UI once RECORD_AUDIO is granted, and to resume after a Stop. */
     fun ensureEngineStarted(): Boolean {
-        if (!engineStarted) engineStarted = engine.start()
+        if (!engineStarted) {
+            engineStarted = engine.start()
+            released = false  // streams reopened → mic live again
+        }
         return engineStarted
+    }
+
+    /**
+     * Fully stops audio: parks the transport, finalizes any capture, and
+     * closes the Oboe streams so the MICROPHONE is released (the privacy
+     * indicator turns off). Loop content stays in RAM for a later resume;
+     * the engine object is not destroyed. Triggered by the notification Stop
+     * action and by app exit (onTaskRemoved).
+     */
+    private fun releaseAudio() {
+        released = true
+        engine.stopRecording()
+        engine.stopPlayback()
+        engine.stop()          // closes input+output streams → mic OFF, immediately
+        engineStarted = false
+        abandonFocus()
+        if (isForeground) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            isForeground = false
+        }
+        // Best-effort finalize of any open capture file (off the main thread).
+        serviceScope.launch { runCatching { engine.flushAndCloseSession() } }
     }
 
     // ------------------------------------------------------------------
@@ -109,6 +146,9 @@ class MediaRecordingService : Service() {
     // ------------------------------------------------------------------
 
     private fun onTransportTick() {
+        // While the engine is stopped/released, don't act on stale meter
+        // state (it would wrongly re-foreground or re-request focus).
+        if (!engineStarted) return
         val state = engine.meters.value.latest?.state ?: lastState
         val transportActive = state == AudioEngine.State.RECORDING_MASTER ||
             state == AudioEngine.State.OVERDUBBING ||
@@ -224,13 +264,6 @@ class MediaRecordingService : Service() {
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()  // stays alive while the UI is bound; dies with it otherwise
         isForeground = false
-    }
-
-    private suspend fun stopTransportAndFinalize() {
-        engine.stopRecording()
-        engine.stopPlayback()
-        engine.flushAndCloseSession()
-        // Foreground/focus demotion follows automatically via onTransportTick.
     }
 
     private fun statusText(state: AudioEngine.State): String = when (state) {

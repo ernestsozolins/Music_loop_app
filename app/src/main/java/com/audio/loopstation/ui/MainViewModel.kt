@@ -3,9 +3,9 @@ package com.audio.loopstation.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.audio.loopstation.AudioDeviceOption
+import com.audio.loopstation.AudioDevices
 import com.audio.loopstation.AudioEngine
-import com.audio.loopstation.AudioOutputs
-import com.audio.loopstation.OutputDevice
 import com.audio.loopstation.StemExporter
 import com.audio.loopstation.data.LoopStationDatabase
 import com.audio.loopstation.data.SessionEntity
@@ -138,11 +138,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val reverb: StateFlow<ReverbUiState> = _reverb.asStateFlow()
 
     /** Playback-device picker state. */
-    private val _outputDevices = MutableStateFlow(listOf(OutputDevice.SYSTEM_DEFAULT))
-    val outputDevices: StateFlow<List<OutputDevice>> = _outputDevices.asStateFlow()
+    private val _outputDevices = MutableStateFlow(listOf(AudioDeviceOption.SYSTEM_DEFAULT))
+    val outputDevices: StateFlow<List<AudioDeviceOption>> = _outputDevices.asStateFlow()
 
     private val _selectedOutputId = MutableStateFlow(0)  // 0 = system default
     val selectedOutputId: StateFlow<Int> = _selectedOutputId.asStateFlow()
+
+    /** Capture-device picker state. */
+    private val _inputDevices = MutableStateFlow(listOf(AudioDeviceOption.SYSTEM_DEFAULT))
+    val inputDevices: StateFlow<List<AudioDeviceOption>> = _inputDevices.asStateFlow()
+
+    private val _selectedInputId = MutableStateFlow(0)  // 0 = system default
+    val selectedInputId: StateFlow<Int> = _selectedInputId.asStateFlow()
 
     /**
      * Offline waveform (peak bins) per recorded track, refreshed when a
@@ -186,6 +193,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         eventsJob?.cancel()
         eventsJob = null
         engine = null
+        requestEngineStart = null  // drop the stale service reference
+    }
+
+    /**
+     * Set by the Activity to MediaRecordingService.ensureEngineStarted, so
+     * the transport intents can reopen the streams (mic) after a Stop that
+     * released them. Idempotent on the service side.
+     */
+    var requestEngineStart: (() -> Unit)? = null
+
+    private fun ensureEngineRunning() {
+        requestEngineStart?.invoke()
     }
 
     /** Result of MediaRecordingService.ensureEngineStarted(), from the Activity. */
@@ -394,6 +413,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_transport.value.isRecording) {
             engine.stopRecording()
         } else {
+            ensureEngineRunning()  // reopen the mic if a Stop released it
             startRecordingWithSnapshot(engine)
         }
     }
@@ -409,6 +429,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onPlayTap() {
+        ensureEngineRunning()  // reopen streams if a Stop released them
         engine?.startPlayback()
     }
 
@@ -455,6 +476,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             engine.stopRecording()
             onSelectNextTrack()
         } else {
+            ensureEngineRunning()  // reopen the mic if a Stop released it
             startRecordingWithSnapshot(engine)
         }
     }
@@ -561,7 +583,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Re-enumerate outputs (call when opening the picker — routing is live). */
     fun refreshOutputDevices() {
         val app = getApplication<Application>()
-        _outputDevices.value = AudioOutputs.list(app)
+        _outputDevices.value = AudioDevices.outputs(app)
         // Drop the selection back to default if the chosen device vanished.
         if (_outputDevices.value.none { it.id == _selectedOutputId.value }) {
             _selectedOutputId.value = 0
@@ -578,6 +600,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 engine.setOutputDevice(0)
                 _selectedOutputId.value = 0
                 refreshOutputDevices()
+            }
+        }
+    }
+
+    /** Re-enumerate capture devices (call when opening the input picker). */
+    fun refreshInputDevices() {
+        val app = getApplication<Application>()
+        _inputDevices.value = AudioDevices.inputs(app)
+        if (_inputDevices.value.none { it.id == _selectedInputId.value }) {
+            _selectedInputId.value = 0
+        }
+    }
+
+    /** Route capture to [deviceId] (0 = system default, e.g. the USB H2n). */
+    fun onSelectInputDevice(deviceId: Int) {
+        val engine = this.engine ?: return
+        _selectedInputId.value = deviceId
+        viewModelScope.launch {
+            if (!engine.setInputDevice(deviceId)) {
+                engine.setInputDevice(0)
+                _selectedInputId.value = 0
+                refreshInputDevices()
             }
         }
     }

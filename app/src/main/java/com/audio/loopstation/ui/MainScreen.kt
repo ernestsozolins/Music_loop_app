@@ -54,6 +54,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     val snackbar = remember { SnackbarHostState() }
     var showSessions by remember { mutableStateOf(false) }
     var showOutputs by remember { mutableStateOf(false) }
+    var showInputs by remember { mutableStateOf(false) }
 
     if (showSessions) {
         val sessions by viewModel.sessions.collectAsStateWithLifecycle()
@@ -75,7 +76,9 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     if (showOutputs) {
         val devices by viewModel.outputDevices.collectAsStateWithLifecycle()
         val selectedId by viewModel.selectedOutputId.collectAsStateWithLifecycle()
-        OutputDeviceSheet(
+        DevicePickerSheet(
+            title = "Playback device",
+            subtitle = "Bluetooth output adds latency — run calibration after switching.",
             devices = devices,
             selectedId = selectedId,
             onSelect = { id ->
@@ -83,6 +86,22 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 showOutputs = false
             },
             onDismiss = { showOutputs = false },
+        )
+    }
+
+    if (showInputs) {
+        val devices by viewModel.inputDevices.collectAsStateWithLifecycle()
+        val selectedId by viewModel.selectedInputId.collectAsStateWithLifecycle()
+        DevicePickerSheet(
+            title = "Recording device",
+            subtitle = "Pick your USB interface (e.g. Zoom H2n) or a mic to record from.",
+            devices = devices,
+            selectedId = selectedId,
+            onSelect = { id ->
+                viewModel.onSelectInputDevice(id)
+                showInputs = false
+            },
+            onDismiss = { showInputs = false },
         )
     }
 
@@ -136,6 +155,10 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                     }
                 },
                 onSessionsTap = { showSessions = true },
+                onInputTap = {
+                    viewModel.refreshInputDevices()
+                    showInputs = true
+                },
                 onOutputTap = {
                     viewModel.refreshOutputDevices()
                     showOutputs = true
