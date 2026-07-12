@@ -137,6 +137,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _reverb = MutableStateFlow(ReverbUiState())
     val reverb: StateFlow<ReverbUiState> = _reverb.asStateFlow()
 
+    /** Latency-calibration state for the setup control. */
+    data class CalibrationUiState(
+        val running: Boolean = false,
+        val latencyMs: Float = -1f,
+        val message: String = "Not calibrated",
+    )
+
+    private val _calibration = MutableStateFlow(CalibrationUiState())
+    val calibration: StateFlow<CalibrationUiState> = _calibration.asStateFlow()
+
     /** Playback-device picker state. */
     private val _outputDevices = MutableStateFlow(listOf(AudioDeviceOption.SYSTEM_DEFAULT))
     val outputDevices: StateFlow<List<AudioDeviceOption>> = _outputDevices.asStateFlow()
@@ -574,6 +584,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val v = size.coerceIn(0f, 1f)
         engine?.setReverbRoomSize(v) ?: return
         _reverb.update { it.copy(roomSize = v) }
+    }
+
+    /**
+     * Runs ping-and-listen round-trip calibration: the engine plays a short
+     * test tone and times how long it takes to return through the mic, then
+     * applies that as the overdub offset so layers line up. Requires output
+     * reaching the mic (speaker near the device, or a loopback) and a quiet,
+     * stopped transport.
+     */
+    fun onCalibrateLatency() {
+        val engine = this.engine ?: return
+        if (_calibration.value.running) return
+        _calibration.update { it.copy(running = true, message = "Listening for the test tone…") }
+        viewModelScope.launch {
+            ensureEngineRunning()      // calibration needs the streams open
+            engine.stopPlayback()      // precondition: transport Idle/Stopped
+            delay(80)
+            val frames = engine.calibrateLatency()
+            _calibration.update {
+                if (frames != null) {
+                    val ms = engine.calibratedLatencyMillis
+                    it.copy(running = false, latencyMs = ms,
+                        message = "Round-trip latency: ${"%.1f".format(ms)} ms (applied)")
+                } else {
+                    it.copy(running = false,
+                        message = "Couldn't hear the tone — route output to the speaker " +
+                            "(near the mic) and keep the transport stopped, then retry")
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------

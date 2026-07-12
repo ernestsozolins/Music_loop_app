@@ -1,6 +1,9 @@
 package com.audio.loopstation.ui
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -9,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledIconToggleButton
@@ -18,6 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import com.audio.loopstation.ui.MainViewModel.TrackUiState
 import kotlinx.coroutines.flow.StateFlow
@@ -50,25 +55,58 @@ fun TrackRow(
         modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = if (track.isSelected) {
-                MaterialTheme.colorScheme.secondaryContainer
+                MaterialTheme.colorScheme.primaryContainer
             } else {
                 MaterialTheme.colorScheme.surfaceVariant
             },
         ),
+        // Selected track gets a bold accent border so it's unmistakable.
+        border = if (track.isSelected) {
+            BorderStroke(3.dp, MaterialTheme.colorScheme.primary)
+        } else {
+            null
+        },
+        elevation = CardDefaults.cardElevation(
+            defaultElevation = if (track.isSelected) 6.dp else 1.dp,
+        ),
     ) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // Accent bar on the selected track's leading edge.
+                if (track.isSelected) {
+                    Box(
+                        Modifier
+                            .width(5.dp)
+                            .height(36.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(MaterialTheme.colorScheme.primary),
+                    )
+                    Spacer(Modifier.width(12.dp))
+                }
                 Column(Modifier.weight(1f)) {
-                    Text(track.name, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        track.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = if (track.isSelected) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
+                    )
                     Text(
                         text = when {
                             track.isClearing -> "Clearing…"
+                            track.isSelected && track.hasContent -> "● SELECTED · Recorded"
+                            track.isSelected -> "● SELECTED · Armed to record"
                             track.hasContent -> "Recorded"
-                            track.isSelected -> "Armed"
                             else -> "Empty"
                         },
                         style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (track.isSelected) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                     )
                 }
                 ToggleChip(label = "M", checked = track.muted, onToggle = onMuteToggle)

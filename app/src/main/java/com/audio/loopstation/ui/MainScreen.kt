@@ -42,6 +42,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     val transport by viewModel.transport.collectAsStateWithLifecycle()
     val tracks by viewModel.tracks.collectAsStateWithLifecycle()
     val reverb by viewModel.reverb.collectAsStateWithLifecycle()
+    val calibration by viewModel.calibration.collectAsStateWithLifecycle()
     val trackWaveforms by viewModel.trackWaveforms.collectAsStateWithLifecycle()
     // The live waveform and playhead flows are deliberately NOT collected
     // here: they change ~60 times a second, and collecting them in
@@ -183,8 +184,10 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
         val fxPanel: @Composable () -> Unit = {
             MonitorFxPanel(
                 reverb = reverb,
+                calibration = calibration,
                 onMixChange = viewModel::onReverbMixChange,
                 onRoomSizeChange = viewModel::onReverbRoomSizeChange,
+                onCalibrate = viewModel::onCalibrateLatency,
             )
         }
 
