@@ -188,24 +188,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     data class BackingTrackUiState(
         val slot: Int,
         val name: String = "",
+        // [state] is polled from the engine (single source of truth); [copying]
+        // is a client-only flag for the pre-open file copy the engine can't see.
         val state: AudioEngine.BackingTrackState = AudioEngine.BackingTrackState.EMPTY,
+        val copying: Boolean = false,
         val loop: Boolean = true,
         val gain: Float = 0.8f,       // fader position; UNITY_FADER = 0 dB
         val lengthMs: Int = 0,
     ) {
+        val isBusy: Boolean
+            get() = copying || state == AudioEngine.BackingTrackState.LOADING
         val isLoaded: Boolean
-            get() = state != AudioEngine.BackingTrackState.EMPTY &&
-                state != AudioEngine.BackingTrackState.LOADING &&
-                state != AudioEngine.BackingTrackState.ERROR
+            get() = !isBusy && (state == AudioEngine.BackingTrackState.READY ||
+                state == AudioEngine.BackingTrackState.PLAYING ||
+                state == AudioEngine.BackingTrackState.ENDED)
         val isPlaying: Boolean get() = state == AudioEngine.BackingTrackState.PLAYING
-        val isBusy: Boolean get() = state == AudioEngine.BackingTrackState.LOADING
-        val isError: Boolean get() = state == AudioEngine.BackingTrackState.ERROR
+        val isError: Boolean get() = !copying && state == AudioEngine.BackingTrackState.ERROR
     }
 
     private val _backingTracks = MutableStateFlow(
         List(AudioEngine.BACKING_STREAM_SLOTS) { BackingTrackUiState(slot = it) },
     )
     val backingTracks: StateFlow<List<BackingTrackUiState>> = _backingTracks.asStateFlow()
+
+    // The on-disk copy backing each slot. Every load writes a UNIQUE file so a
+    // replace never truncates the file the reader thread is still streaming;
+    // the previous file is unlinked only after the engine reopens (POSIX keeps
+    // the old inode alive for the reader's open fd until it closes). Touched
+    // from both the IO load and the main-thread remove, so it's concurrent.
+    private val backingFiles = java.util.concurrent.ConcurrentHashMap<Int, File>()
 
     // ------------------------------------------------------------------
     // Service connection (MainActivity's ServiceConnection calls these)
@@ -421,14 +432,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         // Backing-track slots advance on the reader thread (LOADING -> READY,
-        // PLAYING -> ENDED). Poll only when a slot is in use; the data-class
-        // equality dedup means an unchanged snapshot never reaches collectors,
-        // so this cannot recompose per frame.
-        if (_backingTracks.value.any { it.state != AudioEngine.BackingTrackState.EMPTY }) {
+        // PLAYING -> ENDED). Poll only when a slot is in use (in-flight copy or
+        // loaded); the data-class equality dedup means an unchanged snapshot
+        // never reaches collectors, so this cannot recompose per frame.
+        if (_backingTracks.value.any { it.copying || it.state != AudioEngine.BackingTrackState.EMPTY }) {
             val rate = engine.sampleRate
             _backingTracks.update { list ->
                 list.map { bt ->
-                    val st = engine.backingTrackState(bt.slot)
+                    val native = engine.backingTrackState(bt.slot)
+                    // The engine only sees the slot after openBackingTrack is
+                    // queued, and never sees a client-side copy failure at all
+                    // (native stays EMPTY). While native reads EMPTY, keep our
+                    // optimistic LOADING / copy-failure ERROR so a stale read
+                    // can't flicker or erase the row; a genuine format error
+                    // reports as native ERROR and is accepted normally.
+                    val st = if (native == AudioEngine.BackingTrackState.EMPTY &&
+                        (bt.state == AudioEngine.BackingTrackState.LOADING ||
+                            bt.state == AudioEngine.BackingTrackState.ERROR)
+                    ) {
+                        bt.state
+                    } else {
+                        native
+                    }
                     val lenMs = if (rate > 0) {
                         (engine.backingTrackLengthFrames(bt.slot) * 1000L / rate).toInt()
                     } else {
@@ -736,13 +761,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val engine = this.engine ?: return
         val app = getApplication<Application>()
         val name = queryDisplayName(uri) ?: "Slot ${slot + 1}"
-        // Optimistic LOADING so the row shows a spinner immediately.
+        // Show a busy row immediately: the copy runs before the engine ever
+        // sees the slot, so `copying` (not a polled state) drives the spinner.
         _backingTracks.update { list ->
-            list.map { if (it.slot == slot) it.copy(name = name, state = AudioEngine.BackingTrackState.LOADING) else it }
+            list.map { if (it.slot == slot) it.copy(name = name, copying = true) else it }
         }
         val loop = _backingTracks.value[slot].loop
         viewModelScope.launch(Dispatchers.IO) {
-            val dest = File(File(app.filesDir, "backing").apply { mkdirs() }, "slot_$slot.wav")
+            val dir = File(app.filesDir, "backing").apply { mkdirs() }
+            val dest = File(dir, "slot_${slot}_${System.nanoTime()}.wav")  // unique per load
             val copied = try {
                 app.contentResolver.openInputStream(uri)?.use { input ->
                     dest.outputStream().use { input.copyTo(it) }
@@ -752,10 +779,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (copied) {
                 engine.openBackingTrack(slot, dest.absolutePath, loop)  // async -> READY/ERROR
+                // The engine has (re)opened; the previous file's reader fd is
+                // released as it processes this open, so unlinking it now is safe.
+                backingFiles.put(slot, dest)?.delete()
+                // Hand off to the polled LOADING state; the reader marks it
+                // within a tick, and the poll's stale-EMPTY guard covers the gap.
+                _backingTracks.update { list ->
+                    list.map {
+                        if (it.slot == slot) {
+                            it.copy(copying = false, state = AudioEngine.BackingTrackState.LOADING)
+                        } else {
+                            it
+                        }
+                    }
+                }
             } else {
                 dest.delete()
                 _backingTracks.update { list ->
-                    list.map { if (it.slot == slot) it.copy(state = AudioEngine.BackingTrackState.ERROR) else it }
+                    list.map {
+                        if (it.slot == slot) {
+                            it.copy(copying = false, state = AudioEngine.BackingTrackState.ERROR)
+                        } else {
+                            it
+                        }
+                    }
                 }
             }
         }
@@ -793,9 +840,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun onRemoveBackingTrack(slot: Int) {
         val engine = this.engine ?: return
         engine.closeBackingTrack(slot)
-        viewModelScope.launch(Dispatchers.IO) {
-            File(File(getApplication<Application>().filesDir, "backing"), "slot_$slot.wav").delete()
-        }
+        val file = backingFiles.remove(slot)
+        if (file != null) viewModelScope.launch(Dispatchers.IO) { file.delete() }
         _backingTracks.update { list ->
             list.map { if (it.slot == slot) BackingTrackUiState(slot = slot, loop = it.loop, gain = it.gain) else it }
         }
