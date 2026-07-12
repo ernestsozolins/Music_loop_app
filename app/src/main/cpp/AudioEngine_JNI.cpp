@@ -502,6 +502,14 @@ JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetUndoPassT
   return engine != nullptr ? engine->undoPassTrack() : -1;
 }
 
+// Silences the first `frames` of a track's loop (cut a bad start); undoable.
+// BLOCKS ~30 ms — call from a background dispatcher.
+JNIEXPORT jboolean JNICALL Java_com_audio_loopstation_AudioEngine_nativeTrimTrackStart(
+    JNIEnv*, jobject, jlong handle, jint track, jint frames) {
+  AudioEngine* engine = fromHandle(handle);
+  return (engine != nullptr && engine->trimTrackStart(track, frames)) ? JNI_TRUE : JNI_FALSE;
+}
+
 // Fills `dest` with downsampled |peak| bins of the track's loop audio;
 // returns the bin count (0 = empty track / no loop).
 JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetTrackWaveform(

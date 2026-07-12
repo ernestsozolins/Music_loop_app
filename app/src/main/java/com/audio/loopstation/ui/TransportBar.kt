@@ -1,6 +1,7 @@
 package com.audio.loopstation.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledIconToggleButton
@@ -22,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,6 +56,10 @@ fun TransportBar(
     onExportTap: () -> Unit,
     onCountInToggle: () -> Unit,
     onQuantizeToggle: () -> Unit,
+    onSyncToggle: () -> Unit,
+    onTimeSignatureTap: () -> Unit,
+    onUndoTap: () -> Unit,
+    onClearAllTap: () -> Unit,
     onSaveTap: () -> Unit,
     onSessionsTap: () -> Unit,
     onInputTap: () -> Unit,
@@ -132,10 +139,11 @@ fun TransportBar(
                     Icon(Icons.Filled.Share, contentDescription = "Export stems")
                 }
             }
-            // Secondary options row: count-in / quantize / save / sessions.
+            // Metronome / edit options — scrollable so it never overflows.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -150,6 +158,26 @@ fun TransportBar(
                     onClick = onQuantizeToggle,
                     label = { Text("Quantize") },
                 )
+                FilterChip(
+                    selected = transport.syncToLoop,
+                    onClick = onSyncToggle,
+                    label = { Text("Click sync") },
+                )
+                AssistChip(
+                    onClick = onTimeSignatureTap,
+                    label = { Text("${transport.beatsPerMeasure}/4") },
+                )
+                TextButton(onClick = onUndoTap) { Text("Undo") }
+                TextButton(onClick = onClearAllTap) { Text("Clear all") }
+            }
+            // Devices / session actions row.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Spacer(Modifier.weight(1f))
                 TextButton(onClick = onInputTap) { Text("Input") }
                 TextButton(onClick = onOutputTap) { Text("Output") }

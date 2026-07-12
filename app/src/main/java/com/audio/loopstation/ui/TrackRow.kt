@@ -19,6 +19,7 @@ import androidx.compose.material3.FilledIconToggleButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,6 +49,8 @@ fun TrackRow(
     onSoloToggle: () -> Unit,
     onVolumeChange: (Float) -> Unit,
     onPanChange: (Float) -> Unit,
+    onClear: () -> Unit,
+    onTrim: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Card(
@@ -143,6 +146,17 @@ fun TrackRow(
                 range = -1f..1f,
                 onChange = onPanChange,
             )
+
+            // Edit actions — only meaningful once the track holds audio.
+            if (track.hasContent) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(top = 4.dp),
+                ) {
+                    TextButton(onClick = onTrim) { Text("Trim start") }
+                    TextButton(onClick = onClear) { Text("Clear") }
+                }
+            }
         }
     }
 }

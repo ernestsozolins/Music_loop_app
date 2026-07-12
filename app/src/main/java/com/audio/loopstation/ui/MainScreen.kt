@@ -56,6 +56,18 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     var showSessions by remember { mutableStateOf(false) }
     var showOutputs by remember { mutableStateOf(false) }
     var showInputs by remember { mutableStateOf(false) }
+    var trimTarget by remember { mutableStateOf<Int?>(null) }
+
+    trimTarget?.let { index ->
+        TrimStartDialog(
+            loopMs = viewModel.loopLengthMs(),
+            onApply = { millis ->
+                viewModel.onTrimTrackStart(index, millis)
+                trimTarget = null
+            },
+            onDismiss = { trimTarget = null },
+        )
+    }
 
     if (showSessions) {
         val sessions by viewModel.sessions.collectAsStateWithLifecycle()
@@ -149,6 +161,10 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 onExportTap = onExportTap,
                 onCountInToggle = viewModel::onCountInToggle,
                 onQuantizeToggle = viewModel::onQuantizeToggle,
+                onSyncToggle = viewModel::onSyncToLoopToggle,
+                onTimeSignatureTap = viewModel::onTimeSignatureChange,
+                onUndoTap = viewModel::onUndo,
+                onClearAllTap = viewModel::onClearAll,
                 onSaveTap = {
                     scope.launch {
                         val ok = viewModel.saveSession()
@@ -179,12 +195,16 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 onSoloToggle = { viewModel.onSoloToggle(track.index) },
                 onVolumeChange = { viewModel.onVolumeChange(track.index, it) },
                 onPanChange = { viewModel.onPanChange(track.index, it) },
+                onClear = { viewModel.onClearTrack(track.index) },
+                onTrim = { trimTarget = track.index },
             )
         }
         val fxPanel: @Composable () -> Unit = {
             MonitorFxPanel(
                 reverb = reverb,
                 calibration = calibration,
+                monitorLevel = transport.monitorLevel,
+                onMonitorLevelChange = viewModel::onMonitorLevelChange,
                 onMixChange = viewModel::onReverbMixChange,
                 onRoomSizeChange = viewModel::onReverbRoomSizeChange,
                 onCalibrate = viewModel::onCalibrateLatency,

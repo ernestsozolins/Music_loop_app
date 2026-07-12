@@ -31,6 +31,8 @@ import com.audio.loopstation.ui.MainViewModel.ReverbUiState
 fun MonitorFxPanel(
     reverb: ReverbUiState,
     calibration: CalibrationUiState,
+    monitorLevel: Float,
+    onMonitorLevelChange: (Float) -> Unit,
     onMixChange: (Float) -> Unit,
     onRoomSizeChange: (Float) -> Unit,
     onCalibrate: () -> Unit,
@@ -38,11 +40,20 @@ fun MonitorFxPanel(
 ) {
     OutlinedCard(modifier = modifier.fillMaxWidth()) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-            Text("Monitor reverb", style = MaterialTheme.typography.titleMedium)
+            Text("Monitoring", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Headphones only — recordings and exported stems stay dry",
+                "Input monitor level (raise it if you monitor on headphones and " +
+                    "don't hear yourself; leave at 0 for hardware monitoring).",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            FxSlider(label = "Monitor", value = monitorLevel, onChange = onMonitorLevelChange)
+
+            Text(
+                "Reverb — headphones only, recordings and stems stay dry",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
             )
             FxSlider(label = "Mix", value = reverb.mix, onChange = onMixChange)
             FxSlider(label = "Room", value = reverb.roomSize, onChange = onRoomSizeChange)

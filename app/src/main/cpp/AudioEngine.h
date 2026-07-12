@@ -306,6 +306,12 @@ class AudioEngine {
   bool undoLastPass();
   int32_t undoPassTrack() const { return mUndoTrack.load(std::memory_order_acquire); }
 
+  // Silences the first `frames` of a track's loop (cuts a bad start) while
+  // keeping the loop length and sync intact. Snapshots for undo first, so
+  // undoLastPass()/Backspace restores the original. BLOCKS ~30 ms — call
+  // off the main thread. Returns false if the track is empty or busy.
+  bool trimTrackStart(int32_t track, int32_t frames);
+
   // ----- Offline track waveform (control/UI thread; display-grade) -----
   // Downsampled |peak| bins over the track's loop audio. Aligned 32-bit
   // float loads cannot tear, and a bin mixing pre/post-overdub samples is

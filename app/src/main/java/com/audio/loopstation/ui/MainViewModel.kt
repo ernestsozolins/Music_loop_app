@@ -80,9 +80,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val metronomeOn: Boolean = false,
         val countIn: Boolean = true,
         val quantize: Boolean = true,
+        val syncToLoop: Boolean = true,
         val bpm: Int = 120,
         val beatsPerMeasure: Int = 4,
         val beatInBar: Int = 0,
+        val monitorLevel: Float = 0f,  // software input monitoring, 0..1
         val exporting: Boolean = false,
         val saving: Boolean = false,
         val engineReady: Boolean = false,  // streams running (mic permission granted)
@@ -567,8 +569,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onClearTrack(index: Int) {
-        engine?.clearTrack(index)
+        val engine = this.engine ?: return
+        engine.clearTrack(index)
+        viewModelScope.launch { delay(120); refreshTrackWaveform(index) }
     }
+
+    fun onClearAll() {
+        val engine = this.engine ?: return
+        engine.clearAll()
+        undoStack.clear()
+        viewModelScope.launch {
+            delay(150)
+            _tracks.value.forEach { refreshTrackWaveform(it.index) }
+        }
+    }
+
+    /** Loop length in milliseconds (0 if no loop) — for the trim dialog range. */
+    fun loopLengthMs(): Int {
+        val engine = this.engine ?: return 0
+        val rate = engine.sampleRate
+        val frames = _transport.value.loopLengthFrames
+        return if (rate > 0) (frames.toLong() * 1000L / rate).toInt() else 0
+    }
+
+    /** Cuts (silences) the first [millis] of a track's loop; undoable. */
+    fun onTrimTrackStart(index: Int, millis: Int) {
+        val engine = this.engine ?: return
+        if (millis <= 0) return
+        viewModelScope.launch {
+            if (engine.trimTrackStart(index, millis)) {
+                delay(120)
+                refreshTrackWaveform(index)
+            }
+        }
+    }
+
+    /** In-UI undo of the last recorded pass / trim (also on the Backspace pedal). */
+    fun onUndo() = onUndoPedal()
 
     // ------------------------------------------------------------------
     // Monitoring reverb intents (output mix only; recordings stay dry)
@@ -680,6 +717,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val on = !_transport.value.quantize
         engine?.setLoopQuantize(on) ?: return
         _transport.update { it.copy(quantize = on) }
+    }
+
+    fun onSyncToLoopToggle() {
+        val on = !_transport.value.syncToLoop
+        engine?.setMetronomeSyncToLoop(on) ?: return
+        _transport.update { it.copy(syncToLoop = on) }
+    }
+
+    /** Cycle the time signature (beats per bar): 2 → 3 → 4 → 6 → back to 2. */
+    fun onTimeSignatureChange() {
+        val engine = this.engine ?: return
+        val cur = _transport.value.beatsPerMeasure
+        val next = when (cur) { 2 -> 3; 3 -> 4; 4 -> 6; else -> 2 }
+        engine.setMetronomeState(_transport.value.metronomeOn, _transport.value.bpm.toFloat(), next)
+        _transport.update { it.copy(beatsPerMeasure = next) }
+    }
+
+    /** Software input-monitoring level (0 = off; hardware monitoring assumed). */
+    fun onMonitorLevelChange(level: Float) {
+        val v = level.coerceIn(0f, 1f)
+        engine?.setMonitorGain(v) ?: return
+        _transport.update { it.copy(monitorLevel = v) }
     }
 
     /**

@@ -413,6 +413,19 @@ class AudioEngine private constructor(private var handle: Long) {
         get() = if (handle != 0L) nativeGetUndoPassTrack(handle) else -1
 
     /**
+     * Silences the first [millis] of a track's loop — cuts a bad start while
+     * keeping loop length + sync. Undoable via [undoLastPass]. Blocks ~30 ms
+     * natively, so runs on [Dispatchers.IO]. Returns true on success.
+     */
+    suspend fun trimTrackStart(track: Int, millis: Int): Boolean = withContext(Dispatchers.IO) {
+        val h = handle
+        val rate = sampleRate
+        if (h == 0L || rate <= 0 || millis <= 0) return@withContext false
+        val frames = (millis.toLong() * rate / 1000L).toInt()
+        nativeTrimTrackStart(h, track, frames)
+    }
+
+    /**
      * Downsampled |peak| bins of a recorded track's loop audio for the
      * offline waveform display, or null if the track is empty. A full-track
      * scan — fetch on content changes, not per frame.
@@ -692,6 +705,7 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeSnapshotTrackForUndo(handle: Long, track: Int)
     private external fun nativeUndoLastPass(handle: Long): Boolean
     private external fun nativeGetUndoPassTrack(handle: Long): Int
+    private external fun nativeTrimTrackStart(handle: Long, track: Int, frames: Int): Boolean
     private external fun nativeGetTrackWaveform(handle: Long, track: Int, dest: FloatArray): Int
 
     private external fun nativeOpenBackingTrack(handle: Long, slot: Int, path: String, loop: Boolean)

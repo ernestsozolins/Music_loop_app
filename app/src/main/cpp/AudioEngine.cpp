@@ -549,6 +549,35 @@ bool AudioEngine::undoLastPass() {
   return true;
 }
 
+bool AudioEngine::trimTrackStart(int32_t track, int32_t frames) {
+  std::lock_guard<std::mutex> lock(mUndoMutex);
+  if (track < 0 || track >= mConfig.trackCount) return false;
+  const int32_t loopLen = mLoopLengthFrames.load(std::memory_order_acquire);
+  if (loopLen <= 0 || !mTracks[track].hasContent.load(std::memory_order_acquire)) return false;
+  if (mExportState.load(std::memory_order_acquire) == kExportRunning) return false;
+  const int32_t n = std::max(0, std::min(frames, loopLen));
+  if (n == 0) return false;
+  const int32_t ch = mConfig.channelCount;
+
+  // Snapshot the whole track first so undo/Backspace restores the original.
+  std::memcpy(mUndoBuffer.data(), mTracks[track].data.data(),
+              static_cast<size_t>(loopLen) * ch * sizeof(float));
+  mUndoHadContent = true;
+  mUndoLoopLen = loopLen;
+  mUndoTrack.store(track, std::memory_order_release);
+
+  // Freeze the mixer's read of this track, zero the first n frames off the
+  // audio thread, then recommit — same handshake as undo.
+  mUndoActive.store(true, std::memory_order_release);
+  pushCommand({CommandType::UndoMute, track});
+  if (isRunning()) std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  std::memset(mTracks[track].data.data(), 0, static_cast<size_t>(n) * ch * sizeof(float));
+  mUndoActive.store(false, std::memory_order_release);
+  pushCommand({CommandType::UndoCommit, track});
+  LOGI("trim: silenced first %d frames of track %d", n, track);
+  return true;
+}
+
 int32_t AudioEngine::trackWaveform(int32_t track, float* bins, int32_t maxBins) const {
   if (track < 0 || track >= mConfig.trackCount || bins == nullptr || maxBins <= 0) return 0;
   const int32_t loopLen = mLoopLengthFrames.load(std::memory_order_acquire);
