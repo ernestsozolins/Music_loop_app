@@ -54,6 +54,7 @@ fun TransportBar(
     onMetronomeToggle: () -> Unit,
     onBpmChange: (Int) -> Unit,
     onExportTap: () -> Unit,
+    onExportToFileTap: () -> Unit,
     onCountInToggle: () -> Unit,
     onQuantizeToggle: () -> Unit,
     onSyncToggle: () -> Unit,
@@ -182,6 +183,10 @@ fun TransportBar(
                 TextButton(onClick = onInputTap) { Text("Input") }
                 TextButton(onClick = onOutputTap) { Text("Output") }
                 TextButton(onClick = onSessionsTap) { Text("Sessions") }
+                // Writes the stems zip to a location the user picks.
+                TextButton(onClick = onExportToFileTap, enabled = !transport.exporting) {
+                    Text(if (transport.exporting) "Exporting…" else "Save to file…")
+                }
                 Button(onClick = onSaveTap, enabled = !transport.saving) {
                     Text(if (transport.saving) "Saving…" else "Save")
                 }

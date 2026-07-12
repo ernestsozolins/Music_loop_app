@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Single source of truth for the UI. The screen renders exclusively from
@@ -955,6 +956,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } finally {
             _transport.update { it.copy(exporting = false) }
         }
+    }
+
+    /**
+     * Exports the session and writes the stems zip to a user-picked location
+     * (a SAF ACTION_CREATE_DOCUMENT destination). Unlike [exportSession] +
+     * share sheet, this drops the file exactly where the user chose — a
+     * folder they control, an SD card, Drive, etc. Returns true on success.
+     */
+    suspend fun exportSessionToUri(uri: Uri): Boolean {
+        val zip = exportSession() ?: return false
+        val app = getApplication<Application>()
+        return withContext(Dispatchers.IO) {
+            try {
+                app.contentResolver.openOutputStream(uri)?.use { out ->
+                    zip.inputStream().use { it.copyTo(out) }
+                } != null
+            } catch (e: Exception) {
+                false
+            }
+        }
+    }
+
+    /** Filesystem-safe default filename for the export destination picker. */
+    fun suggestedExportName(): String {
+        val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+            .format(java.util.Date())
+        return "LoopStation_$stamp.zip"
     }
 
     override fun onCleared() {

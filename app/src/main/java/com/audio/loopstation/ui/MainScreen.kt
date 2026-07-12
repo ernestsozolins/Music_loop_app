@@ -1,5 +1,7 @@
 package com.audio.loopstation.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -149,6 +151,24 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
         }
     }
 
+    // "Save to…" writes the stems zip to a location the user picks (SAF),
+    // rather than only through the share sheet. The picker returns the target
+    // document Uri; the export + copy then runs off the main thread.
+    val saveToFile = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val ok = viewModel.exportSessionToUri(uri)
+                snackbar.showSnackbar(
+                    if (ok) "Saved to your chosen location"
+                    else "Save failed — stop recording and try again",
+                )
+            }
+        }
+    }
+    val onExportToFileTap: () -> Unit = { saveToFile.launch(viewModel.suggestedExportName()) }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
@@ -161,6 +181,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 onMetronomeToggle = viewModel::onMetronomeToggle,
                 onBpmChange = viewModel::onBpmChange,
                 onExportTap = onExportTap,
+                onExportToFileTap = onExportToFileTap,
                 onCountInToggle = viewModel::onCountInToggle,
                 onQuantizeToggle = viewModel::onQuantizeToggle,
                 onSyncToggle = viewModel::onSyncToLoopToggle,
