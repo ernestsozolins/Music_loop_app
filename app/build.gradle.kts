@@ -27,8 +27,9 @@ android {
             cmake {
                 // Oboe's Prefab package is built against the shared C++ runtime,
                 // so the app's native code must use it too (default is static,
-                // which fails with CXX1212).
-                arguments += "-DANDROID_STL=c++_shared"
+                // which fails with CXX1212). Canonical Oboe-docs form.
+                arguments("-DANDROID_STL=c++_shared")
+                cppFlags("-std=c++17")
             }
         }
     }
