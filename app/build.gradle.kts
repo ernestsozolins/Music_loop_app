@@ -22,6 +22,15 @@ android {
             // x86_64 keeps the emulator usable.
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
+
+        externalNativeBuild {
+            cmake {
+                // Oboe's Prefab package is built against the shared C++ runtime,
+                // so the app's native code must use it too (default is static,
+                // which fails with CXX1212).
+                arguments += "-DANDROID_STL=c++_shared"
+            }
+        }
     }
 
     externalNativeBuild {

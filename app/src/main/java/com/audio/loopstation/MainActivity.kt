@@ -24,6 +24,7 @@ import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.core.content.ContextCompat
 import com.audio.loopstation.ui.MainScreen
 import com.audio.loopstation.ui.MainViewModel
+import com.audio.loopstation.ui.MidiPedalController
 import com.audio.loopstation.ui.PedalController
 
 /**
