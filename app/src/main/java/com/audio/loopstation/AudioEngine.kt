@@ -545,6 +545,40 @@ class AudioEngine private constructor(private var handle: Long) {
         if (handle != 0L) nativeSetPlayMode(handle, if (single) 1 else 0)
     }
 
+    /** Per-track fade in/out (ms) at the audible-window edges (0 = hard edges). */
+    fun setTrackFadeMillis(track: Int, millis: Int) {
+        val h = handle
+        val rate = sampleRate
+        if (h == 0L || rate <= 0) return
+        nativeSetTrackFade(h, track, (millis.toLong() * rate / 1000L).toInt())
+    }
+
+    // ------------------------------------------------------------------
+    // Auto-record (hands-free start on an input threshold) + tuner.
+    // ------------------------------------------------------------------
+
+    /** Arm [track] to start recording when the input peak crosses [threshold] (0..1). */
+    fun armAutoRecord(track: Int, threshold: Float) {
+        if (handle != 0L) nativeArmAutoRecord(handle, track, threshold)
+    }
+
+    fun cancelAutoRecord() { if (handle != 0L) nativeCancelAutoRecord(handle) }
+    fun autoRecordArmed(): Boolean = handle != 0L && nativeAutoRecordArmed(handle)
+
+    /** Enable/disable filling the tuner analysis buffer (call when the tuner UI opens). */
+    fun setTunerActive(active: Boolean) { if (handle != 0L) nativeSetTunerActive(handle, active) }
+
+    /** Detected input pitch in Hz, or -1 if there's no clear pitch. */
+    fun detectPitchHz(): Float = if (handle != 0L) nativeDetectPitch(handle) else -1f
+
+    /** Manual overdub-timing offset (ms) — nudge by ear when calibration can't run. */
+    fun setRecordOffsetMillis(millis: Int) {
+        val rate = sampleRate
+        if (handle != 0L && rate > 0) {
+            setRecordOffsetFrames((millis.toLong() * rate / 1000L).toInt())
+        }
+    }
+
     /**
      * Downsampled |peak| bins of a recorded track's loop audio for the
      * offline waveform display, or null if the track is empty. A full-track
@@ -868,6 +902,12 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeAutoTrimTrack(handle: Long, track: Int)
     private external fun nativeSetTrackOneShot(handle: Long, track: Int, oneShot: Boolean)
     private external fun nativeSetPlayMode(handle: Long, mode: Int)
+    private external fun nativeSetTrackFade(handle: Long, track: Int, frames: Int)
+    private external fun nativeArmAutoRecord(handle: Long, track: Int, threshold: Float)
+    private external fun nativeCancelAutoRecord(handle: Long)
+    private external fun nativeAutoRecordArmed(handle: Long): Boolean
+    private external fun nativeSetTunerActive(handle: Long, active: Boolean)
+    private external fun nativeDetectPitch(handle: Long): Float
     private external fun nativeGetTrackWaveform(handle: Long, track: Int, dest: FloatArray): Int
 
     private external fun nativeOpenBackingTrack(handle: Long, slot: Int, path: String, loop: Boolean)

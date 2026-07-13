@@ -61,6 +61,9 @@ fun TransportBar(
     onQuantizeToggle: () -> Unit,
     onSyncToggle: () -> Unit,
     onSingleModeToggle: () -> Unit,
+    autoRecordArmed: Boolean,
+    onAutoRecordToggle: () -> Unit,
+    onTunerTap: () -> Unit,
     onTimeSignatureTap: () -> Unit,
     onUndoTap: () -> Unit,
     onClearAllTap: () -> Unit,
@@ -167,7 +170,12 @@ fun TransportBar(
                 FilterChip(
                     selected = transport.quantize,
                     onClick = onQuantizeToggle,
-                    label = { Text("Quantize") },
+                    label = { Text("Whole bars") },  // snap loop length to full bars
+                )
+                FilterChip(
+                    selected = autoRecordArmed,
+                    onClick = onAutoRecordToggle,
+                    label = { Text(if (autoRecordArmed) "Auto-rec: waiting" else "Auto-rec") },
                 )
                 FilterChip(
                     selected = transport.syncToLoop,
@@ -188,6 +196,7 @@ fun TransportBar(
                     onClick = onRhythmStyleToggle,
                     label = { Text(if (transport.rhythmBeat) "Beat" else "Click") },
                 )
+                TextButton(onClick = onTunerTap) { Text("Tuner") }
                 TextButton(onClick = onUndoTap) { Text("Undo") }
                 TextButton(onClick = onClearAllTap) { Text("Clear all") }
             }

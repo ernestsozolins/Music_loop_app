@@ -74,6 +74,7 @@ AudioEngine::AudioEngine(const Config& config) : mConfig(config) {
   }
   // One spare track's worth of RAM buys single-level per-pass undo.
   mUndoBuffer.assign(static_cast<size_t>(mMaxLoopFrames) * mConfig.channelCount, 0.0f);
+  mPitchBuf.assign(static_cast<size_t>(kPitchBufSize), 0.0f);  // tuner analysis
 
   mMetronome.configure(mConfig.sampleRate, mConfig.channelCount);
   mCalibrator.configure(mConfig.sampleRate, mConfig.channelCount);
@@ -781,6 +782,72 @@ bool AudioEngine::trackOneShot(int32_t track) const {
   return mTracks[track].oneShot.load(std::memory_order_relaxed);
 }
 
+void AudioEngine::setTrackFadeFrames(int32_t track, int32_t frames) {
+  if (track < 0 || track >= mConfig.trackCount) return;
+  mTracks[track].fadeFrames.store(frames < 0 ? 0 : frames, std::memory_order_relaxed);
+}
+
+int32_t AudioEngine::trackFadeFrames(int32_t track) const {
+  if (track < 0 || track >= mConfig.trackCount) return 0;
+  return mTracks[track].fadeFrames.load(std::memory_order_relaxed);
+}
+
+void AudioEngine::armAutoRecord(int32_t track, float threshold) {
+  mAutoRecordTrack.store(clampTrackIndex(track), std::memory_order_relaxed);
+  mAutoRecordThreshold.store(threshold < 0.0005f ? 0.0005f : threshold,
+                             std::memory_order_relaxed);
+  mAutoRecordArmed.store(true, std::memory_order_release);
+}
+
+void AudioEngine::cancelAutoRecord() {
+  mAutoRecordArmed.store(false, std::memory_order_release);
+}
+
+// Autocorrelation pitch detection over the cello/violin range. Control thread;
+// reads the audio-thread-filled buffer (an occasional torn sample is harmless
+// for a tuner). Returns the fundamental in Hz, or -1 with no clear pitch.
+float AudioEngine::detectPitchHz() const {
+  const int32_t n = kPitchBufSize;
+  std::vector<float> w(static_cast<size_t>(n));
+  const int32_t wr = mPitchWrite;  // racy snapshot: fine here
+  double mean = 0.0;
+  for (int32_t i = 0; i < n; ++i) {
+    const float v = mPitchBuf[static_cast<size_t>((wr + i) % n)];
+    w[static_cast<size_t>(i)] = v;
+    mean += v;
+  }
+  mean /= n;
+  double energy = 0.0;
+  for (int32_t i = 0; i < n; ++i) {
+    w[static_cast<size_t>(i)] -= static_cast<float>(mean);  // remove DC
+    energy += static_cast<double>(w[static_cast<size_t>(i)]) * w[static_cast<size_t>(i)];
+  }
+  if (energy < 1e-4) return -1.0f;  // essentially silent
+
+  const int32_t minLag = std::max(2, mConfig.sampleRate / 1200);  // up to ~1200 Hz
+  const int32_t maxLag = std::min(n - 1, mConfig.sampleRate / 55);  // down to ~55 Hz
+  double bestCorr = 0.0;
+  int32_t bestLag = -1;
+  double prev = 0.0, prevPrev = 0.0;
+  for (int32_t lag = minLag; lag <= maxLag; ++lag) {
+    double corr = 0.0;
+    for (int32_t i = 0; i < n - lag; ++i) {
+      corr += static_cast<double>(w[static_cast<size_t>(i)]) * w[static_cast<size_t>(i + lag)];
+    }
+    // A local maximum that clears a clarity bar is a pitch candidate; take the
+    // first strong one (the true period, not its multiples).
+    if (lag > minLag + 1 && prev > prevPrev && prev >= corr && prev > 0.5 * energy) {
+      bestLag = lag - 1;
+      bestCorr = prev;
+      break;
+    }
+    prevPrev = prev;
+    prev = corr;
+  }
+  if (bestLag < 0 || bestCorr <= 0.0) return -1.0f;
+  return static_cast<float>(mConfig.sampleRate) / static_cast<float>(bestLag);
+}
+
 void AudioEngine::autoTrimTrack(int32_t track, float thresholdDb) {
   if (track < 0 || track >= mConfig.trackCount) return;
   const int32_t len = mLoopLengthFrames.load(std::memory_order_relaxed);
@@ -915,6 +982,42 @@ oboe::DataCallbackResult AudioEngine::onOutputReady(float* audioData, int32_t nu
   drainCommands();
   processPendingClears();
   pullInput(mInputScratch.data(), numFrames);
+
+  // Tuner: copy mono input into the analysis buffer while the tuner is open.
+  if (mTunerActive.load(std::memory_order_relaxed)) {
+    const int32_t ch = mConfig.channelCount;
+    for (int32_t f = 0; f < numFrames; ++f) {
+      const float* in = mInputScratch.data() + static_cast<size_t>(f) * ch;
+      float s = 0.0f;
+      for (int32_t c = 0; c < ch; ++c) s += in[c];
+      mPitchBuf[static_cast<size_t>(mPitchWrite)] = s / static_cast<float>(ch);
+      if (++mPitchWrite >= kPitchBufSize) mPitchWrite = 0;
+    }
+  }
+
+  // Auto-record: start the take the instant the input crosses the threshold
+  // (immediate, no count-in) — a hands-free bowed start.
+  if (mAutoRecordArmed.load(std::memory_order_acquire) && !mCalibrator.active()) {
+    const int32_t track = clampTrackIndex(mAutoRecordTrack.load(std::memory_order_relaxed));
+    const uint8_t tp = mTracks[track].transport.load(std::memory_order_relaxed);
+    const bool busy = tp == static_cast<uint8_t>(TrackTransport::Recording) ||
+                      tp == static_cast<uint8_t>(TrackTransport::Overdubbing) ||
+                      mState.load(std::memory_order_relaxed) == EngineState::CountIn;
+    if (!busy) {
+      float peak = 0.0f;
+      const int32_t samples = numFrames * mConfig.channelCount;
+      for (int32_t i = 0; i < samples; ++i) {
+        const float a = mInputScratch[static_cast<size_t>(i)];
+        const float m = a < 0.0f ? -a : a;
+        if (m > peak) peak = m;
+      }
+      if (peak >= mAutoRecordThreshold.load(std::memory_order_relaxed)) {
+        mAutoRecordArmed.store(false, std::memory_order_release);
+        armRecordTrack(track, /*allowCountIn=*/false);
+        updateGlobalState();
+      }
+    }
+  }
 
   if (mCalibrator.active()) {
     // Calibration owns the block: silence + ping burst out, threshold scan
@@ -1439,7 +1542,7 @@ void AudioEngine::updateGlobalState() {
 // Start record/overdub on a specific track. The first-ever recording defines
 // the shared master loop length; while a master exists, an empty track records
 // a fresh one-loop take and a track with content starts an overdub pass.
-void AudioEngine::armRecordTrack(int32_t track) {
+void AudioEngine::armRecordTrack(int32_t track, bool allowCountIn) {
   LoopTrack& t = mTracks[track];
   if (t.clearing.load(std::memory_order_relaxed)) return;  // not armable mid-clear
   mOverdubTrack = track;
@@ -1451,7 +1554,7 @@ void AudioEngine::armRecordTrack(int32_t track) {
     t.recPos = 0;
     t.pos = 0;
     setPlayhead(0);
-    if (mCountInEnabled.load(std::memory_order_relaxed)) {
+    if (allowCountIn && mCountInEnabled.load(std::memory_order_relaxed)) {
       // Count in before capturing, so the loop starts on a downbeat. Auto-start
       // the click if it is off, so the count-in always has a beat (and the take
       // is bar-quantizable). Recording begins after `mCountInBars` full bars.
@@ -1536,6 +1639,7 @@ void AudioEngine::beginTrackClear(LoopTrack& track) {
   track.playOffset.store(0, std::memory_order_relaxed);  // reset start-shift
   track.trimStart.store(0, std::memory_order_relaxed);   // reset trim window
   track.trimEnd.store(0, std::memory_order_relaxed);
+  track.fadeFrames.store(0, std::memory_order_relaxed);  // reset fade
   track.clearing.store(true, std::memory_order_relaxed);
 }
 
@@ -1661,6 +1765,7 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
     int32_t rdTrack[kMaxTracks];
     int32_t trS[kMaxTracks];  // audible-window start (buffer frames)
     int32_t trE[kMaxTracks];  // audible-window end
+    int32_t trFade[kMaxTracks];  // fade in/out length at the window edges
     bool rdOneShot[kMaxTracks];   // 1-shot: independent playhead, stops at trE
     int32_t rdPosStart[kMaxTracks];
     int32_t nRead = 0;
@@ -1691,6 +1796,10 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
         trS[nRead] = track.trimStart.load(std::memory_order_relaxed);
         const int32_t te = track.trimEnd.load(std::memory_order_relaxed);
         trE[nRead] = (te <= 0 || te > mLoopLen) ? mLoopLen : te;
+        // Fade can be at most half the window so the in/out ramps don't overlap.
+        int32_t fade = track.fadeFrames.load(std::memory_order_relaxed);
+        const int32_t half = (trE[nRead] - trS[nRead]) / 2;
+        trFade[nRead] = fade > half ? half : fade;
         const bool os = track.oneShot.load(std::memory_order_relaxed);
         rdOneShot[nRead] = os;
         if (os) {
@@ -1730,9 +1839,19 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
       for (int32_t a = 0; a < nRead; ++a) {
         // Non-destructive trim: only the [trimStart, trimEnd) window sounds.
         if (rd[a] >= trS[a] && rd[a] < trE[a]) {
+          float fg = 1.0f;
+          if (trFade[a] > 0) {
+            const int32_t fromStart = rd[a] - trS[a];
+            const int32_t toEnd = trE[a] - rd[a];
+            if (fromStart < trFade[a]) {
+              fg = static_cast<float>(fromStart) / static_cast<float>(trFade[a]);
+            } else if (toEnd <= trFade[a]) {
+              fg = static_cast<float>(toEnd) / static_cast<float>(trFade[a]);
+            }
+          }
           const float* s = srcs[a] + static_cast<size_t>(rd[a]) * ch;
-          o[0] += s[0] * gainL[a];
-          if (ch == 2) o[1] += s[1] * gainR[a];
+          o[0] += s[0] * gainL[a] * fg;
+          if (ch == 2) o[1] += s[1] * gainR[a] * fg;
         }
         if (++rd[a] >= mLoopLen) rd[a] = 0;
       }

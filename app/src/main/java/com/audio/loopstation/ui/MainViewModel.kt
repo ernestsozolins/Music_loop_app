@@ -79,6 +79,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // recorded length (ms) once it holds content.
         val recElapsedMs: Int = 0,
         val recordedLengthMs: Int = 0,
+        // Loop-seam fade in/out length (ms); 0 = hard edges.
+        val fadeMs: Int = 0,
     )
 
     // NOTE: the playhead position deliberately does NOT live here. It
@@ -157,6 +159,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _position = MutableStateFlow(0f)
     val position: StateFlow<Float> = _position.asStateFlow()
 
+    /** Live input peak, 0..1, ~60 Hz. Draw-phase consumers only (level meter). */
+    private val _inputLevel = MutableStateFlow(0f)
+    val inputLevel: StateFlow<Float> = _inputLevel.asStateFlow()
+
     /** Monitoring reverb parameters (output mix only; recordings stay dry). */
     data class ReverbUiState(val mix: Float = 0f, val roomSize: Float = 0.5f)
 
@@ -193,6 +199,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _drone = MutableStateFlow(DroneUiState())
     val drone: StateFlow<DroneUiState> = _drone.asStateFlow()
+
+    /** Auto-record armed? (starts on the first bowed note.) */
+    private val _autoRecordArmed = MutableStateFlow(false)
+    val autoRecordArmed: StateFlow<Boolean> = _autoRecordArmed.asStateFlow()
+
+    /** Manual overdub-timing offset (ms) for Bluetooth output. */
+    private val _manualLatencyMs = MutableStateFlow(0)
+    val manualLatencyMs: StateFlow<Int> = _manualLatencyMs.asStateFlow()
+
+    /** Tuner (pitch detection). Polled only while the tuner sheet is open. */
+    data class TunerUiState(
+        val active: Boolean = false,
+        val hasPitch: Boolean = false,
+        val note: String = "—",
+        val cents: Int = 0,
+        val hz: Float = 0f,
+    )
+
+    private val _tuner = MutableStateFlow(TunerUiState())
+    val tuner: StateFlow<TunerUiState> = _tuner.asStateFlow()
+    private var tunerJob: Job? = null
 
     /** Latency-calibration state for the setup control. */
     data class CalibrationUiState(
@@ -297,6 +324,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         metersJob = null
         eventsJob?.cancel()
         eventsJob = null
+        tunerJob?.cancel()
+        tunerJob = null
+        engine?.setTunerActive(false)
+        _tuner.update { it.copy(active = false) }
         engine = null
         requestEngineStart = null  // drop the stale service reference
     }
@@ -445,6 +476,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         // High-rate values go to their dedicated draw-phase flow…
         _position.value = if (loopLen > 0) playhead.toFloat() / loopLen.toFloat() else 0f
+        _inputLevel.value = latest?.inputPeak ?: 0f
+
+        // Auto-record disarms itself when it fires — reflect that in the UI.
+        if (_autoRecordArmed.value && !engine.autoRecordArmed()) _autoRecordArmed.value = false
 
         // …while the transport data class (structural equality => StateFlow
         // dedup) only emits on real state changes.
@@ -986,6 +1021,77 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _drone.update { it.copy(gain = v) }
     }
 
+    // ---- Auto-record (hands-free start on the first bowed note) ----
+
+    fun onToggleAutoRecord() {
+        val engine = this.engine ?: return
+        if (_autoRecordArmed.value) {
+            engine.cancelAutoRecord()
+            _autoRecordArmed.value = false
+        } else {
+            ensureEngineRunning()
+            engine.armAutoRecord(selectedTrackIndex(), AUTO_RECORD_THRESHOLD)
+            _autoRecordArmed.value = true
+        }
+    }
+
+    // ---- Manual overdub-timing offset (ms) ----
+
+    fun onManualLatencyChange(ms: Int) {
+        val v = ms.coerceIn(0, 500)
+        engine?.setRecordOffsetMillis(v) ?: return
+        _manualLatencyMs.value = v
+    }
+
+    // ---- Tuner ----
+
+    fun onTunerOpen() {
+        val engine = this.engine ?: return
+        ensureEngineRunning()
+        engine.setTunerActive(true)
+        _tuner.update { it.copy(active = true) }
+        tunerJob?.cancel()
+        tunerJob = viewModelScope.launch(Dispatchers.Default) {
+            while (true) {
+                val hz = engine.detectPitchHz()
+                if (hz > 0f) {
+                    val (note, cents) = hzToNoteCents(hz)
+                    _tuner.update { it.copy(hasPitch = true, note = note, cents = cents, hz = hz) }
+                } else {
+                    _tuner.update { it.copy(hasPitch = false) }
+                }
+                delay(110)
+            }
+        }
+    }
+
+    fun onTunerClose() {
+        tunerJob?.cancel()
+        tunerJob = null
+        engine?.setTunerActive(false)
+        _tuner.update { it.copy(active = false) }
+    }
+
+    private fun hzToNoteCents(hz: Float): Pair<String, Int> {
+        val midi = 69.0 + 12.0 * (Math.log(hz / 440.0) / Math.log(2.0))
+        val nearest = Math.round(midi).toInt()
+        val cents = Math.round((midi - nearest) * 100.0).toInt()
+        val names = arrayOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+        val name = names[((nearest % 12) + 12) % 12]
+        val octave = nearest / 12 - 1
+        return "$name$octave" to cents
+    }
+
+    // ---- Per-track loop-seam fade ----
+
+    fun onToggleTrackFade(index: Int) {
+        val engine = this.engine ?: return
+        val cur = _tracks.value.getOrNull(index)?.fadeMs ?: 0
+        val next = if (cur > 0) 0 else FADE_MS
+        engine.setTrackFadeMillis(index, next)
+        _tracks.update { list -> list.map { if (it.index == index) it.copy(fadeMs = next) else it } }
+    }
+
     /**
      * Runs ping-and-listen round-trip calibration: the engine plays a short
      * test tone and times how long it takes to return through the mic, then
@@ -1383,6 +1489,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         const val MIN_BPM = 40
         const val MAX_BPM = 240
+
+        // Input peak that triggers auto-record (~ -34 dBFS: a clear bowed note,
+        // above room noise).
+        private const val AUTO_RECORD_THRESHOLD = 0.02f
+        // Loop-seam fade length when fade is toggled on.
+        private const val FADE_MS = 20
 
         // dB fader taper: unity (0 dB) sits at this fader position; below maps
         // to MIN_DB..0, above to 0..MAX_DB.

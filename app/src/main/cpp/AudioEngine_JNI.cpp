@@ -636,6 +636,41 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetPlayMode(
   }
 }
 
+// ----- Per-track fade -----
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetTrackFade(
+    JNIEnv*, jobject, jlong handle, jint track, jint frames) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setTrackFadeFrames(track, frames);
+}
+
+// ----- Auto-record -----
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeArmAutoRecord(
+    JNIEnv*, jobject, jlong handle, jint track, jfloat threshold) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->armAutoRecord(track, threshold);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeCancelAutoRecord(
+    JNIEnv*, jobject, jlong handle) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->cancelAutoRecord();
+}
+
+JNIEXPORT jboolean JNICALL Java_com_audio_loopstation_AudioEngine_nativeAutoRecordArmed(
+    JNIEnv*, jobject, jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  return (engine != nullptr && engine->autoRecordArmed()) ? JNI_TRUE : JNI_FALSE;
+}
+
+// ----- Tuner -----
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetTunerActive(
+    JNIEnv*, jobject, jlong handle, jboolean active) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setTunerActive(active);
+}
+
+JNIEXPORT jfloat JNICALL Java_com_audio_loopstation_AudioEngine_nativeDetectPitch(
+    JNIEnv*, jobject, jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->detectPitchHz() : -1.0f;
+}
+
 // Fills `dest` with downsampled |peak| bins of the track's loop audio;
 // returns the bin count (0 = empty track / no loop).
 JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetTrackWaveform(

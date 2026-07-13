@@ -63,6 +63,7 @@ fun TrackRow(
     onClear: () -> Unit,
     onTrim: () -> Unit,
     onNudge: (Int) -> Unit,
+    onToggleFade: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Card(
@@ -231,6 +232,9 @@ fun TrackRow(
                     modifier = Modifier.padding(top = 4.dp),
                 ) {
                     TextButton(onClick = onTrim) { Text("Trim") }
+                    TextButton(onClick = onToggleFade) {
+                        Text(if (track.fadeMs > 0) "Fade ✓" else "Fade")
+                    }
                     TextButton(onClick = onClear) { Text("Clear") }
                 }
             }

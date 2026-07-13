@@ -50,6 +50,8 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     val reverb by viewModel.reverb.collectAsStateWithLifecycle()
     val filterState by viewModel.filter.collectAsStateWithLifecycle()
     val droneState by viewModel.drone.collectAsStateWithLifecycle()
+    val autoRecordArmed by viewModel.autoRecordArmed.collectAsStateWithLifecycle()
+    val manualLatencyMs by viewModel.manualLatencyMs.collectAsStateWithLifecycle()
     val calibration by viewModel.calibration.collectAsStateWithLifecycle()
     val trackWaveforms by viewModel.trackWaveforms.collectAsStateWithLifecycle()
     // The live waveform and playhead flows are deliberately NOT collected
@@ -64,6 +66,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     var showSessions by remember { mutableStateOf(false) }
     var showOutputs by remember { mutableStateOf(false) }
     var showInputs by remember { mutableStateOf(false) }
+    var showTuner by remember { mutableStateOf(false) }
     var trimTarget by remember { mutableStateOf<Int?>(null) }
 
     trimTarget?.let { index ->
@@ -130,6 +133,17 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 showInputs = false
             },
             onDismiss = { showInputs = false },
+        )
+    }
+
+    if (showTuner) {
+        val tunerState by viewModel.tuner.collectAsStateWithLifecycle()
+        TunerSheet(
+            tuner = tunerState,
+            onDismiss = {
+                viewModel.onTunerClose()
+                showTuner = false
+            },
         )
     }
 
@@ -204,6 +218,12 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 onQuantizeToggle = viewModel::onQuantizeToggle,
                 onSyncToggle = viewModel::onSyncToLoopToggle,
                 onSingleModeToggle = viewModel::onToggleSingleMode,
+                autoRecordArmed = autoRecordArmed,
+                onAutoRecordToggle = viewModel::onToggleAutoRecord,
+                onTunerTap = {
+                    viewModel.onTunerOpen()
+                    showTuner = true
+                },
                 onTimeSignatureTap = viewModel::onTimeSignatureChange,
                 onUndoTap = viewModel::onUndo,
                 onClearAllTap = viewModel::onClearAll,
@@ -246,6 +266,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 onClear = { viewModel.onClearTrack(track.index) },
                 onTrim = { trimTarget = track.index },
                 onNudge = { delta -> viewModel.onNudgeTrack(track.index, delta) },
+                onToggleFade = { viewModel.onToggleTrackFade(track.index) },
             )
         }
         val backingPanel: @Composable () -> Unit = {
@@ -265,6 +286,9 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 drone = droneState,
                 droneNotes = viewModel.droneNotes,
                 calibration = calibration,
+                inputLevel = viewModel.inputLevel,
+                manualLatencyMs = manualLatencyMs,
+                onManualLatencyChange = viewModel::onManualLatencyChange,
                 monitorLevel = transport.monitorLevel,
                 onMonitorLevelChange = viewModel::onMonitorLevelChange,
                 onMixChange = viewModel::onReverbMixChange,

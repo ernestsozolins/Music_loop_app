@@ -221,6 +221,27 @@ class AudioEngine {
   }
   int32_t playMode() const { return mPlayMode.load(std::memory_order_relaxed); }
 
+  // Per-track fade in/out (frames) applied at the audible-window edges to
+  // smooth the loop seam (sustained material won't click at the wrap).
+  void setTrackFadeFrames(int32_t track, int32_t frames);
+  int32_t trackFadeFrames(int32_t track) const;
+
+  // ----- Auto-record (control thread) -----
+  // Arm a track so recording starts the instant the input peak crosses
+  // `threshold` (0..1) — hands-free for a bowed start. Immediate (no
+  // count-in). cancelAutoRecord() disarms; autoRecordArmed() polls the state.
+  void armAutoRecord(int32_t track, float threshold);
+  void cancelAutoRecord();
+  bool autoRecordArmed() const { return mAutoRecordArmed.load(std::memory_order_acquire); }
+
+  // ----- Tuner (pitch detection) -----
+  // While active, the audio thread fills a small analysis buffer; detectPitch
+  // runs autocorrelation on it (control/UI thread) and returns the fundamental
+  // in Hz, or -1 if there is no clear pitch (silence/noise). Poll a few times
+  // a second while the tuner UI is open.
+  void setTunerActive(bool active) { mTunerActive.store(active, std::memory_order_relaxed); }
+  float detectPitchHz() const;
+
   void clearAll();        // drop the loop and schedule all tracks for clearing
   void clearTrack(int32_t track);
   // Immediately drop loop state + all content flags WITHOUT wiping the track
@@ -509,6 +530,8 @@ class AudioEngine {
     // Playback mode: false = loop (sync to the shared clock), true = 1-shot
     // (play the window once from its start on trigger, then stop).
     std::atomic<bool> oneShot{false};
+    // Fade in/out length (frames) at the audible-window edges; 0 = hard edges.
+    std::atomic<int32_t> fadeFrames{0};
   };
 
   // One callback object per stream; routes into the engine by direction.
@@ -548,7 +571,7 @@ class AudioEngine {
   // ----- Audio-thread helpers (realtime-safe) -----
   void drainCommands();
   void applyCommand(const Command& cmd);
-  void armRecordTrack(int32_t track);      // start record/overdub on a track
+  void armRecordTrack(int32_t track, bool allowCountIn = true);  // start record/overdub
   void recordToggleTrack(int32_t track);   // one-button record/close/overdub
   void recordStopTrack(int32_t track);     // close a record/overdub (never start)
   void finalizeTrackRecord(int32_t track); // close a fresh fixed-length take
@@ -600,6 +623,19 @@ class AudioEngine {
   int32_t mMasterTrack = 0;     // reference track: drives mPlayhead + click sync
   int32_t mCountInTrack = 0;    // track the pending count-in will start recording
   std::atomic<int32_t> mPlayMode{0};  // PlayMode: 0 = Multi, 1 = Single
+
+  // Auto-record: arm a track to start on an input-threshold cross (audio
+  // thread watches the input peak; disarms itself when it fires).
+  std::atomic<bool> mAutoRecordArmed{false};
+  std::atomic<int32_t> mAutoRecordTrack{0};
+  std::atomic<float> mAutoRecordThreshold{0.02f};
+
+  // Tuner: the audio thread writes mono input into mPitchBuf while active; the
+  // control thread scans it (autocorrelation) in detectPitchHz().
+  static constexpr int32_t kPitchBufSize = 2048;
+  std::atomic<bool> mTunerActive{false};
+  std::vector<float> mPitchBuf;  // kPitchBufSize, allocated in the constructor
+  int32_t mPitchWrite = 0;       // audio thread only
   bool mPrimed = false;         // look-ahead cushion established
   int32_t mDeclickRemaining = 0;
 

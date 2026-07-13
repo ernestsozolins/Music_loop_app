@@ -18,9 +18,15 @@ import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.StateFlow
 import com.audio.loopstation.AudioEngine
 import com.audio.loopstation.ui.MainViewModel.CalibrationUiState
 import com.audio.loopstation.ui.MainViewModel.DroneNote
@@ -41,6 +47,9 @@ fun MonitorFxPanel(
     drone: DroneUiState,
     droneNotes: List<DroneNote>,
     calibration: CalibrationUiState,
+    inputLevel: StateFlow<Float>,
+    manualLatencyMs: Int,
+    onManualLatencyChange: (Int) -> Unit,
     monitorLevel: Float,
     onMonitorLevelChange: (Float) -> Unit,
     onMixChange: (Float) -> Unit,
@@ -57,6 +66,17 @@ fun MonitorFxPanel(
 ) {
     OutlinedCard(modifier = modifier.fillMaxWidth()) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            Text("Input level", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Set your interface/mic so loud bowing peaks near — but not into — " +
+                    "the red.",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            InputLevelMeter(level = inputLevel, modifier = Modifier.padding(vertical = 8.dp))
+
+            HorizontalDivider(Modifier.padding(vertical = 12.dp))
+
             Text("Monitoring", style = MaterialTheme.typography.titleMedium)
             Text(
                 "Input monitor level (raise it if you monitor on headphones and " +
@@ -162,8 +182,58 @@ fun MonitorFxPanel(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+
+            Text(
+                "Manual offset: $manualLatencyMs ms — for Bluetooth headphones " +
+                    "where calibration can't hear the output, nudge until overdubs " +
+                    "line up by ear.",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            Slider(
+                value = manualLatencyMs.toFloat(),
+                onValueChange = { onManualLatencyChange(it.toInt()) },
+                valueRange = 0f..500f,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp),
+            )
         }
     }
+}
+
+/** Peak input meter with a peak-hold marker and a red clip zone (top ~5%). */
+@Composable
+private fun InputLevelMeter(level: StateFlow<Float>, modifier: Modifier = Modifier) {
+    val trackColor = MaterialTheme.colorScheme.surfaceVariant
+    val okColor = MaterialTheme.colorScheme.primary
+    val hotColor = Color(0xFFE0A030)
+    val clipColor = MaterialTheme.colorScheme.error
+    val peak = produceState(initialValue = 0f, level) { level.collect { value = it } }
+    androidx.compose.foundation.layout.Spacer(
+        modifier
+            .fillMaxWidth()
+            .height(18.dp)
+            .drawBehind {
+                drawRect(trackColor)
+                val v = peak.value.coerceIn(0f, 1f)
+                val w = size.width * v
+                val color = when {
+                    v >= 0.98f -> clipColor
+                    v >= 0.8f -> hotColor
+                    else -> okColor
+                }
+                drawRect(color, size = Size(w, size.height))
+                // Clip zone marker at 98%.
+                drawLine(
+                    clipColor,
+                    Offset(size.width * 0.98f, 0f),
+                    Offset(size.width * 0.98f, size.height),
+                    strokeWidth = 2f,
+                )
+            },
+    )
 }
 
 @Composable
