@@ -465,6 +465,55 @@ class AudioEngine private constructor(private var handle: Long) {
         nativeTrimTrackStart(h, track, frames)
     }
 
+    // ------------------------------------------------------------------
+    // Non-destructive trim: an audible window over the whole take.
+    // ------------------------------------------------------------------
+
+    /** Set the audible window (ms). endMs <= 0 means "to the loop end". */
+    fun setTrackTrimMillis(track: Int, startMs: Int, endMs: Int) {
+        val h = handle
+        val rate = sampleRate
+        if (h == 0L || rate <= 0) return
+        val start = (startMs.toLong() * rate / 1000L).toInt()
+        val end = if (endMs <= 0) 0 else (endMs.toLong() * rate / 1000L).toInt()
+        nativeSetTrackTrim(h, track, start, end)
+    }
+
+    /** Current trim start in ms. */
+    fun trackTrimStartMillis(track: Int): Int {
+        val h = handle
+        val rate = sampleRate
+        if (h == 0L || rate <= 0) return 0
+        return (nativeGetTrackTrimStart(h, track).toLong() * 1000L / rate).toInt()
+    }
+
+    /** Current trim end in ms (resolved to the loop length when unset). */
+    fun trackTrimEndMillis(track: Int): Int {
+        val h = handle
+        val rate = sampleRate
+        if (h == 0L || rate <= 0) return 0
+        return (nativeGetTrackTrimEnd(h, track).toLong() * 1000L / rate).toInt()
+    }
+
+    /** Auto-trim leading/trailing silence (non-destructive). Off-main. */
+    suspend fun autoTrimTrack(track: Int) = withContext(Dispatchers.IO) {
+        if (handle != 0L) nativeAutoTrimTrack(handle, track)
+    }
+
+    // ------------------------------------------------------------------
+    // Play modes: per-track loop vs 1-shot, and global Single/Multi.
+    // ------------------------------------------------------------------
+
+    /** Loop (false, default) vs 1-shot (true: play once from the top, stop). */
+    fun setTrackOneShot(track: Int, oneShot: Boolean) {
+        if (handle != 0L) nativeSetTrackOneShot(handle, track, oneShot)
+    }
+
+    /** Single (true) = only one track sounds at a time (verse/chorus). */
+    fun setSinglePlayMode(single: Boolean) {
+        if (handle != 0L) nativeSetPlayMode(handle, if (single) 1 else 0)
+    }
+
     /**
      * Downsampled |peak| bins of a recorded track's loop audio for the
      * offline waveform display, or null if the track is empty. A full-track
@@ -772,6 +821,12 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeUndoLastPass(handle: Long): Boolean
     private external fun nativeGetUndoPassTrack(handle: Long): Int
     private external fun nativeTrimTrackStart(handle: Long, track: Int, frames: Int): Boolean
+    private external fun nativeSetTrackTrim(handle: Long, track: Int, startFrames: Int, endFrames: Int)
+    private external fun nativeGetTrackTrimStart(handle: Long, track: Int): Int
+    private external fun nativeGetTrackTrimEnd(handle: Long, track: Int): Int
+    private external fun nativeAutoTrimTrack(handle: Long, track: Int)
+    private external fun nativeSetTrackOneShot(handle: Long, track: Int, oneShot: Boolean)
+    private external fun nativeSetPlayMode(handle: Long, mode: Int)
     private external fun nativeGetTrackWaveform(handle: Long, track: Int, dest: FloatArray): Int
 
     private external fun nativeOpenBackingTrack(handle: Long, slot: Int, path: String, loop: Boolean)

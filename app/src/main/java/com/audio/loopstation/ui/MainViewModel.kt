@@ -69,6 +69,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val shiftMs: Int = 0,      // start-shift, signed ms
         // Per-track transport (RC-505 model): independent play/record/stop.
         val transport: AudioEngine.TrackTransport = AudioEngine.TrackTransport.EMPTY,
+        // Non-destructive trim window (ms); trimEndMs resolves to loop length.
+        val trimStartMs: Int = 0,
+        val trimEndMs: Int = 0,
+        // Playback mode: false = loop, true = 1-shot (play once then stop).
+        val oneShot: Boolean = false,
     )
 
     // NOTE: the playhead position deliberately does NOT live here. It
@@ -91,6 +96,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val beatsPerMeasure: Int = 4,
         val beatInBar: Int = 0,
         val monitorLevel: Float = 0f,  // software input monitoring, 0..1
+        val singleMode: Boolean = false,  // Single: one track sounds at a time
         val exporting: Boolean = false,
         val saving: Boolean = false,
         val engineReady: Boolean = false,  // streams running (mic permission granted)
@@ -128,6 +134,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var suppressUndoFor = -1
     // Previous per-track transport, for detecting record-close transitions.
     private val prevTransports = HashMap<Int, AudioEngine.TrackTransport>()
+    // Auto-trim leading/trailing silence when a take closes (RC-505-style).
+    private var autoTrimEnabled = true
 
     private val _transport = MutableStateFlow(TransportUiState())
     val transport: StateFlow<TransportUiState> = _transport.asStateFlow()
@@ -423,6 +431,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     hasContent = mask and (1 shl t.index) != 0,
                     isClearing = mask and (1 shl (t.index + 16)) != 0,
                     transport = engine.trackTransport(t.index),  // per-track play/rec/stop
+                    trimStartMs = engine.trackTrimStartMillis(t.index),
+                    trimEndMs = engine.trackTrimEndMillis(t.index),
                 )
             }
         }
@@ -483,6 +493,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val prev = prevTransports[t.index] ?: AudioEngine.TrackTransport.EMPTY
             if (prev.isRecording && !cur.isRecording) {
                 refreshTrackWaveform(t.index)
+                // Auto-trim leading/trailing silence off a FRESH take only (not
+                // after an overdub, which would reset a window the user set).
+                // The full audio is kept; only the audible window is set.
+                if (prev == AudioEngine.TrackTransport.RECORDING && t.hasContent && autoTrimEnabled) {
+                    val idx = t.index
+                    viewModelScope.launch(Dispatchers.Default) { engine.autoTrimTrack(idx) }
+                }
                 if (suppressUndoFor == t.index) {
                     suppressUndoFor = -1
                 } else if (t.hasContent && undoStack.lastOrNull() != t.index) {  // fold repeats
@@ -709,6 +726,64 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val engine = this.engine ?: return
         engine.resetTrackShift(index)
         _tracks.update { list -> list.map { if (it.index == index) it.copy(shiftMs = 0) else it } }
+    }
+
+    // ---- Non-destructive trim (whole take kept; only the window plays) ----
+
+    /** Set a track's audible window (ms); endMs <= 0 = to the loop end. Live. */
+    fun onSetTrackTrim(index: Int, startMs: Int, endMs: Int) {
+        val engine = this.engine ?: return
+        engine.setTrackTrimMillis(index, startMs, endMs)
+        _tracks.update { list ->
+            list.map {
+                if (it.index == index) {
+                    it.copy(trimStartMs = startMs, trimEndMs = if (endMs <= 0) loopLengthMs() else endMs)
+                } else {
+                    it
+                }
+            }
+        }
+    }
+
+    /** Reset the trim window to the whole take. */
+    fun onResetTrackTrim(index: Int) {
+        val engine = this.engine ?: return
+        engine.setTrackTrimMillis(index, 0, 0)
+        val full = loopLengthMs()
+        _tracks.update { list ->
+            list.map { if (it.index == index) it.copy(trimStartMs = 0, trimEndMs = full) else it }
+        }
+    }
+
+    /** Auto-trim leading/trailing silence off a track. */
+    fun onAutoTrimTrack(index: Int) {
+        val engine = this.engine ?: return
+        viewModelScope.launch { engine.autoTrimTrack(index) }  // poll picks up the new window
+    }
+
+    /** Auto-trim and return the resulting window (ms) for the trim editor. */
+    suspend fun autoTrimAndGet(index: Int): Pair<Int, Int> {
+        val engine = this.engine ?: return 0 to loopLengthMs()
+        engine.autoTrimTrack(index)
+        return engine.trackTrimStartMillis(index) to engine.trackTrimEndMillis(index)
+    }
+
+    // ---- Play modes ----
+
+    /** Toggle a track between Loop and 1-Shot playback. */
+    fun onToggleOneShot(index: Int) {
+        val engine = this.engine ?: return
+        val next = !(_tracks.value.getOrNull(index)?.oneShot ?: false)
+        engine.setTrackOneShot(index, next)
+        _tracks.update { list -> list.map { if (it.index == index) it.copy(oneShot = next) else it } }
+    }
+
+    /** Toggle global Single mode (one track at a time) vs Multi. */
+    fun onToggleSingleMode() {
+        val engine = this.engine ?: return
+        val next = !_transport.value.singleMode
+        engine.setSinglePlayMode(next)
+        _transport.update { it.copy(singleMode = next) }
     }
 
     fun onClearTrack(index: Int) {

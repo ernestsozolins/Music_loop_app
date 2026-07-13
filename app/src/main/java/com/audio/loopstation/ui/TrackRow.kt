@@ -18,6 +18,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledIconToggleButton
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -54,6 +55,7 @@ fun TrackRow(
     onRecord: () -> Unit,
     onPlay: () -> Unit,
     onStop: () -> Unit,
+    onToggleOneShot: () -> Unit,
     onMuteToggle: () -> Unit,
     onSoloToggle: () -> Unit,
     onVolumeChange: (Float) -> Unit,
@@ -147,6 +149,7 @@ fun TrackRow(
                 onRecord = onRecord,
                 onPlay = onPlay,
                 onStop = onStop,
+                onToggleOneShot = onToggleOneShot,
             )
 
             // Selected row: live input meter. Recorded rows: the actual loop
@@ -207,7 +210,7 @@ fun TrackRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.padding(top = 4.dp),
                 ) {
-                    TextButton(onClick = onTrim) { Text("Trim start") }
+                    TextButton(onClick = onTrim) { Text("Trim") }
                     TextButton(onClick = onClear) { Text("Clear") }
                 }
             }
@@ -221,6 +224,7 @@ private fun TrackTransportBar(
     onRecord: () -> Unit,
     onPlay: () -> Unit,
     onStop: () -> Unit,
+    onToggleOneShot: () -> Unit,
 ) {
     val recording = track.transport == TrackTransport.RECORDING ||
         track.transport == TrackTransport.OVERDUBBING
@@ -280,6 +284,13 @@ private fun TrackTransportBar(
         ) {
             Text("■", style = MaterialTheme.typography.titleMedium)
         }
+        Spacer(Modifier.weight(1f))
+        // Loop vs 1-Shot playback for this track.
+        FilterChip(
+            selected = track.oneShot,
+            onClick = onToggleOneShot,
+            label = { Text(if (track.oneShot) "1-Shot" else "Loop") },
+        )
     }
 }
 

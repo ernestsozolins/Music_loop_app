@@ -547,6 +547,42 @@ JNIEXPORT jboolean JNICALL Java_com_audio_loopstation_AudioEngine_nativeTrimTrac
   return (engine != nullptr && engine->trimTrackStart(track, frames)) ? JNI_TRUE : JNI_FALSE;
 }
 
+// ----- Non-destructive trim -----
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetTrackTrim(
+    JNIEnv*, jobject, jlong handle, jint track, jint startFrames, jint endFrames) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setTrackTrim(track, startFrames, endFrames);
+}
+
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetTrackTrimStart(
+    JNIEnv*, jobject, jlong handle, jint track) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->trackTrimStart(track) : 0;
+}
+
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetTrackTrimEnd(
+    JNIEnv*, jobject, jlong handle, jint track) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->trackTrimEnd(track) : 0;
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeAutoTrimTrack(
+    JNIEnv*, jobject, jlong handle, jint track) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->autoTrimTrack(track);
+}
+
+// ----- Play modes -----
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetTrackOneShot(
+    JNIEnv*, jobject, jlong handle, jint track, jboolean oneShot) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setTrackOneShot(track, oneShot);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetPlayMode(
+    JNIEnv*, jobject, jlong handle, jint mode) {
+  if (AudioEngine* engine = fromHandle(handle)) {
+    engine->setPlayMode(mode == 1 ? AudioEngine::PlayMode::Single : AudioEngine::PlayMode::Multi);
+  }
+}
+
 // Fills `dest` with downsampled |peak| bins of the track's loop audio;
 // returns the bin count (0 = empty track / no loop).
 JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetTrackWaveform(

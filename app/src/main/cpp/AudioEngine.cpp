@@ -743,6 +743,75 @@ void AudioEngine::setTrackMuted(int32_t track, bool muted) {
   mTracks[track].muted.store(muted, std::memory_order_relaxed);
 }
 
+void AudioEngine::setTrackTrim(int32_t track, int32_t startFrames, int32_t endFrames) {
+  if (track < 0 || track >= mConfig.trackCount) return;
+  const int32_t len = mLoopLengthFrames.load(std::memory_order_relaxed);
+  int32_t s = startFrames < 0 ? 0 : startFrames;
+  int32_t e = endFrames;
+  if (len > 0) {
+    s = std::min(s, len);
+    if (e > len) e = len;
+  }
+  if (e > 0 && e <= s) e = s + 1;  // keep a non-empty window
+  mTracks[track].trimStart.store(s, std::memory_order_relaxed);
+  mTracks[track].trimEnd.store(e <= 0 ? 0 : e, std::memory_order_relaxed);
+}
+
+int32_t AudioEngine::trackTrimStart(int32_t track) const {
+  if (track < 0 || track >= mConfig.trackCount) return 0;
+  return mTracks[track].trimStart.load(std::memory_order_relaxed);
+}
+
+int32_t AudioEngine::trackTrimEnd(int32_t track) const {
+  if (track < 0 || track >= mConfig.trackCount) return 0;
+  const int32_t e = mTracks[track].trimEnd.load(std::memory_order_relaxed);
+  const int32_t len = mLoopLengthFrames.load(std::memory_order_relaxed);
+  return (e <= 0 || e > len) ? len : e;  // resolve the sentinel to loop length
+}
+
+void AudioEngine::setTrackOneShot(int32_t track, bool oneShot) {
+  if (track < 0 || track >= mConfig.trackCount) return;
+  mTracks[track].oneShot.store(oneShot, std::memory_order_relaxed);
+}
+
+bool AudioEngine::trackOneShot(int32_t track) const {
+  if (track < 0 || track >= mConfig.trackCount) return false;
+  return mTracks[track].oneShot.load(std::memory_order_relaxed);
+}
+
+void AudioEngine::autoTrimTrack(int32_t track, float thresholdDb) {
+  if (track < 0 || track >= mConfig.trackCount) return;
+  const int32_t len = mLoopLengthFrames.load(std::memory_order_relaxed);
+  const LoopTrack& t = mTracks[track];
+  if (len <= 0 || !t.hasContent.load(std::memory_order_relaxed)) return;
+  const int32_t ch = mConfig.channelCount;
+  const float threshold = std::pow(10.0f, thresholdDb / 20.0f);  // linear peak
+  const float* data = t.data.data();  // read-only scan; concurrent playback is fine
+
+  int32_t first = -1;
+  int32_t last = -1;
+  for (int32_t f = 0; f < len; ++f) {
+    float peak = 0.0f;
+    const float* s = data + static_cast<size_t>(f) * ch;
+    for (int32_t c = 0; c < ch; ++c) {
+      const float a = s[c] < 0.0f ? -s[c] : s[c];
+      if (a > peak) peak = a;
+    }
+    if (peak > threshold) {
+      if (first < 0) first = f;
+      last = f;
+    }
+  }
+  if (first < 0) return;  // silent track: leave the window untouched
+
+  // Keep a short margin so transients aren't clipped (~10 ms).
+  const int32_t margin = mConfig.sampleRate / 100;
+  int32_t s = std::max(0, first - margin);
+  int32_t e = std::min(len, last + 1 + margin);
+  mTracks[track].trimStart.store(s, std::memory_order_relaxed);
+  mTracks[track].trimEnd.store(e >= len ? 0 : e, std::memory_order_relaxed);
+}
+
 void AudioEngine::setMonitorGain(float gain) {
   mMonitorGain.store(clampf(gain, 0.0f, 2.0f), std::memory_order_relaxed);
 }
@@ -1191,6 +1260,8 @@ void AudioEngine::applyCommand(const Command& cmd) {
         mTracks[t].pos = 0;
         mTracks[t].recPos = 0;
         mTracks[t].posFrames.store(0, std::memory_order_relaxed);
+        mTracks[t].trimStart.store(0, std::memory_order_relaxed);
+        mTracks[t].trimEnd.store(0, std::memory_order_relaxed);
       }
       break;
     }
@@ -1205,6 +1276,8 @@ void AudioEngine::applyCommand(const Command& cmd) {
           mTracks[t].hasContent.store(true, std::memory_order_relaxed);
           mTracks[t].pos = 0;
           mTracks[t].posFrames.store(0, std::memory_order_relaxed);
+          mTracks[t].trimStart.store(0, std::memory_order_relaxed);  // full window
+          mTracks[t].trimEnd.store(0, std::memory_order_relaxed);
           mTracks[t].transport.store(static_cast<uint8_t>(TrackTransport::Stopped),
                                      std::memory_order_relaxed);  // ready; user presses play
           if (firstContent < 0) firstContent = t;
@@ -1276,19 +1349,31 @@ void AudioEngine::startTrackPlaying(int32_t track) {
       tr.clearing.load(std::memory_order_relaxed)) {
     return;
   }
+  // Single mode: starting a track stops the others (verse/chorus switching).
+  const bool single = mPlayMode.load(std::memory_order_relaxed) ==
+                      static_cast<int32_t>(PlayMode::Single);
   bool othersBusy = false;
   for (int32_t o = 0; o < mConfig.trackCount; ++o) {
     if (o == track) continue;
     const uint8_t tp = mTracks[o].transport.load(std::memory_order_relaxed);
-    if (tp == static_cast<uint8_t>(TrackTransport::Playing) ||
-        tp == static_cast<uint8_t>(TrackTransport::Overdubbing) ||
-        tp == static_cast<uint8_t>(TrackTransport::Recording)) {
-      othersBusy = true;
-      break;
+    const bool busy = tp == static_cast<uint8_t>(TrackTransport::Playing) ||
+                      tp == static_cast<uint8_t>(TrackTransport::Overdubbing) ||
+                      tp == static_cast<uint8_t>(TrackTransport::Recording);
+    if (busy) {
+      if (single && tp != static_cast<uint8_t>(TrackTransport::Recording)) {
+        stopTrackInternal(o);
+      } else {
+        othersBusy = true;
+      }
     }
   }
-  if (!othersBusy) setPlayhead(0);
-  tr.posFrames.store(mPlayhead, std::memory_order_relaxed);
+  if (tr.oneShot.load(std::memory_order_relaxed)) {
+    tr.pos = tr.trimStart.load(std::memory_order_relaxed);  // 1-shot: from window start
+    tr.posFrames.store(tr.pos, std::memory_order_relaxed);
+  } else {
+    if (!othersBusy) setPlayhead(0);  // lone loop track: rewind to the top
+    tr.posFrames.store(mPlayhead, std::memory_order_relaxed);
+  }
   tr.transport.store(static_cast<uint8_t>(TrackTransport::Playing), std::memory_order_relaxed);
 }
 
@@ -1394,6 +1479,8 @@ void AudioEngine::finalizeTrackRecord(int32_t track) {
   t.recPos = 0;
   t.pos = 0;
   t.posFrames.store(0, std::memory_order_relaxed);
+  t.trimStart.store(0, std::memory_order_relaxed);  // fresh take: full window
+  t.trimEnd.store(0, std::memory_order_relaxed);
   t.transport.store(static_cast<uint8_t>(TrackTransport::Playing), std::memory_order_relaxed);
 }
 
@@ -1429,6 +1516,8 @@ void AudioEngine::finalizeMasterOrQuantize() {
 void AudioEngine::beginTrackClear(LoopTrack& track) {
   track.clearCursor = 0;
   track.playOffset.store(0, std::memory_order_relaxed);  // reset start-shift
+  track.trimStart.store(0, std::memory_order_relaxed);   // reset trim window
+  track.trimEnd.store(0, std::memory_order_relaxed);
   track.clearing.store(true, std::memory_order_relaxed);
 }
 
@@ -1458,6 +1547,8 @@ void AudioEngine::finalizeMasterLoop() {
     t.hasContent.store(true, std::memory_order_relaxed);
     t.pos = 0;
     t.posFrames.store(0, std::memory_order_relaxed);
+    t.trimStart.store(0, std::memory_order_relaxed);  // fresh take: full window
+    t.trimEnd.store(0, std::memory_order_relaxed);
     t.transport.store(static_cast<uint8_t>(TrackTransport::Playing), std::memory_order_relaxed);
     mMasterTrack = mOverdubTrack;
     setPlayhead(0);
@@ -1538,6 +1629,10 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
     float gainR[kMaxTracks];
     int32_t rd[kMaxTracks];
     int32_t rdTrack[kMaxTracks];
+    int32_t trS[kMaxTracks];  // audible-window start (buffer frames)
+    int32_t trE[kMaxTracks];  // audible-window end
+    bool rdOneShot[kMaxTracks];   // 1-shot: independent playhead, stops at trE
+    int32_t rdPosStart[kMaxTracks];
     int32_t nRead = 0;
     // Write targets: fresh fixed-length takes (overwrite, bounded to one loop)
     // and overdubs (sum, continuous).
@@ -1563,9 +1658,25 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
         const float pan = (ch == 2) ? track.pan.load(std::memory_order_relaxed) : 0.0f;
         gainL[nRead] = g * (pan > 0.0f ? 1.0f - pan : 1.0f);
         gainR[nRead] = g * (pan < 0.0f ? 1.0f + pan : 1.0f);
-        int32_t off = track.playOffset.load(std::memory_order_relaxed) % mLoopLen;
-        if (off < 0) off += mLoopLen;
-        rd[nRead] = (phaseStart + off) % mLoopLen;
+        trS[nRead] = track.trimStart.load(std::memory_order_relaxed);
+        const int32_t te = track.trimEnd.load(std::memory_order_relaxed);
+        trE[nRead] = (te <= 0 || te > mLoopLen) ? mLoopLen : te;
+        const bool os = track.oneShot.load(std::memory_order_relaxed);
+        rdOneShot[nRead] = os;
+        if (os) {
+          // 1-shot: play the window once from its own playhead (set to the
+          // window start on trigger), independent of the shared loop clock.
+          int32_t p = track.pos;
+          if (p < 0) p = 0;
+          if (p >= mLoopLen) p = mLoopLen - 1;
+          rd[nRead] = p;
+          rdPosStart[nRead] = p;
+        } else {
+          int32_t off = track.playOffset.load(std::memory_order_relaxed) % mLoopLen;
+          if (off < 0) off += mLoopLen;
+          rd[nRead] = (phaseStart + off) % mLoopLen;
+          rdPosStart[nRead] = 0;
+        }
         rdTrack[nRead] = t;
         ++nRead;
       }
@@ -1587,9 +1698,12 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
       float* o = out + static_cast<size_t>(f) * ch;
       const float* inF = in + static_cast<size_t>(f) * ch;
       for (int32_t a = 0; a < nRead; ++a) {
-        const float* s = srcs[a] + static_cast<size_t>(rd[a]) * ch;
-        o[0] += s[0] * gainL[a];
-        if (ch == 2) o[1] += s[1] * gainR[a];
+        // Non-destructive trim: only the [trimStart, trimEnd) window sounds.
+        if (rd[a] >= trS[a] && rd[a] < trE[a]) {
+          const float* s = srcs[a] + static_cast<size_t>(rd[a]) * ch;
+          o[0] += s[0] * gainL[a];
+          if (ch == 2) o[1] += s[1] * gainR[a];
+        }
         if (++rd[a] >= mLoopLen) rd[a] = 0;
       }
       for (int32_t w = 0; w < nWrite; ++w) {
@@ -1621,7 +1735,18 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
       setPlayhead(np);
     }
     for (int32_t a = 0; a < nRead; ++a) {
-      mTracks[rdTrack[a]].posFrames.store(mPlayhead, std::memory_order_relaxed);
+      if (rdOneShot[a]) {
+        // Advance the 1-shot's own playhead; stop it once the window is done.
+        const int32_t np = rdPosStart[a] + frames;
+        mTracks[rdTrack[a]].pos = np;
+        mTracks[rdTrack[a]].posFrames.store(std::min(np, trE[a]), std::memory_order_relaxed);
+        if (np >= trE[a]) {
+          mTracks[rdTrack[a]].transport.store(static_cast<uint8_t>(TT::Stopped),
+                                              std::memory_order_relaxed);
+        }
+      } else {
+        mTracks[rdTrack[a]].posFrames.store(mPlayhead, std::memory_order_relaxed);
+      }
     }
   }
 }

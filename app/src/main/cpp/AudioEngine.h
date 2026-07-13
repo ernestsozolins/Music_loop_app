@@ -208,6 +208,17 @@ class AudioEngine {
   TrackTransport trackTransport(int32_t track) const;
   int32_t trackPositionFrames(int32_t track) const;  // this track's playhead
 
+  // ----- Play modes (control thread) -----
+  // Per-track loop vs 1-shot playback, and the global Single/Multi mode
+  // (Single: starting a track stops the others — verse/chorus switching).
+  void setTrackOneShot(int32_t track, bool oneShot);
+  bool trackOneShot(int32_t track) const;
+  enum class PlayMode : int32_t { Multi = 0, Single = 1 };
+  void setPlayMode(PlayMode mode) {
+    mPlayMode.store(static_cast<int32_t>(mode), std::memory_order_relaxed);
+  }
+  int32_t playMode() const { return mPlayMode.load(std::memory_order_relaxed); }
+
   void clearAll();        // drop the loop and schedule all tracks for clearing
   void clearTrack(int32_t track);
   // Immediately drop loop state + all content flags WITHOUT wiping the track
@@ -342,6 +353,19 @@ class AudioEngine {
   // off the main thread. Returns false if the track is empty or busy.
   bool trimTrackStart(int32_t track, int32_t frames);
 
+  // ----- Non-destructive trim (control thread; lock-free atomics) -----
+  // Restricts the audible window of a track to [startFrames, endFrames)
+  // WITHOUT touching the recorded audio — the whole take is retained and the
+  // handles can be moved (or reset) live. endFrames <= 0 means "to the loop
+  // end". Applied on the next callback.
+  void setTrackTrim(int32_t track, int32_t startFrames, int32_t endFrames);
+  int32_t trackTrimStart(int32_t track) const;
+  int32_t trackTrimEnd(int32_t track) const;  // resolves the 0 sentinel to loopLen
+  // Scans a track's audio (read-only; any non-realtime thread) and sets its
+  // trim window to the region above `thresholdDb`, dropping leading/trailing
+  // silence. A small pre-roll/tail margin is kept. No-op on an empty track.
+  void autoTrimTrack(int32_t track, float thresholdDb = -45.0f);
+
   // ----- Offline track waveform (control/UI thread; display-grade) -----
   // Downsampled |peak| bins over the track's loop audio. Aligned 32-bit
   // float loads cannot tear, and a bin mixing pre/post-overdub samples is
@@ -447,6 +471,14 @@ class AudioEngine {
     std::atomic<int32_t> posFrames{0};  // published playhead mirror
     int32_t pos = 0;      // audio-thread playhead within the loop
     int32_t recPos = 0;   // audio-thread record/capture cursor
+    // Non-destructive trim: only the buffer window [trimStart, trimEnd) is
+    // audible; the rest of the take is retained. trimEnd == 0 means "to the
+    // loop end". Plain atomics, applied live in the mix.
+    std::atomic<int32_t> trimStart{0};
+    std::atomic<int32_t> trimEnd{0};
+    // Playback mode: false = loop (sync to the shared clock), true = 1-shot
+    // (play the window once from its start on trigger, then stop).
+    std::atomic<bool> oneShot{false};
   };
 
   // One callback object per stream; routes into the engine by direction.
@@ -537,6 +569,7 @@ class AudioEngine {
   int32_t mOverdubTrack = 0;    // track currently defining the master take
   int32_t mMasterTrack = 0;     // reference track: drives mPlayhead + click sync
   int32_t mCountInTrack = 0;    // track the pending count-in will start recording
+  std::atomic<int32_t> mPlayMode{0};  // PlayMode: 0 = Multi, 1 = Single
   bool mPrimed = false;         // look-ahead cushion established
   int32_t mDeclickRemaining = 0;
 

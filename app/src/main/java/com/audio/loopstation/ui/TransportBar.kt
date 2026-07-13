@@ -58,6 +58,7 @@ fun TransportBar(
     onCountInToggle: () -> Unit,
     onQuantizeToggle: () -> Unit,
     onSyncToggle: () -> Unit,
+    onSingleModeToggle: () -> Unit,
     onTimeSignatureTap: () -> Unit,
     onUndoTap: () -> Unit,
     onClearAllTap: () -> Unit,
@@ -163,6 +164,11 @@ fun TransportBar(
                     selected = transport.syncToLoop,
                     onClick = onSyncToggle,
                     label = { Text("Click sync") },
+                )
+                FilterChip(
+                    selected = transport.singleMode,
+                    onClick = onSingleModeToggle,
+                    label = { Text(if (transport.singleMode) "Single" else "Multi") },
                 )
                 AssistChip(
                     onClick = onTimeSignatureTap,

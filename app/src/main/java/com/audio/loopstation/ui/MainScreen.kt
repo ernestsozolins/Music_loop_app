@@ -63,14 +63,21 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     var trimTarget by remember { mutableStateOf<Int?>(null) }
 
     trimTarget?.let { index ->
-        TrimStartDialog(
-            loopMs = viewModel.loopLengthMs(),
-            onApply = { millis ->
-                viewModel.onTrimTrackStart(index, millis)
-                trimTarget = null
-            },
-            onDismiss = { trimTarget = null },
-        )
+        val track = tracks.firstOrNull { it.index == index }
+        if (track != null) {
+            TrimEditorDialog(
+                trackName = track.name,
+                loopMs = viewModel.loopLengthMs(),
+                initialStartMs = track.trimStartMs,
+                initialEndMs = track.trimEndMs,
+                bins = trackWaveforms[index],
+                onChange = { s, e -> viewModel.onSetTrackTrim(index, s, e) },
+                onAutoTrim = { viewModel.autoTrimAndGet(index) },
+                onDismiss = { trimTarget = null },
+            )
+        } else {
+            trimTarget = null
+        }
     }
 
     if (showSessions) {
@@ -185,6 +192,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 onCountInToggle = viewModel::onCountInToggle,
                 onQuantizeToggle = viewModel::onQuantizeToggle,
                 onSyncToggle = viewModel::onSyncToLoopToggle,
+                onSingleModeToggle = viewModel::onToggleSingleMode,
                 onTimeSignatureTap = viewModel::onTimeSignatureChange,
                 onUndoTap = viewModel::onUndo,
                 onClearAllTap = viewModel::onClearAll,
@@ -219,6 +227,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 onRecord = { viewModel.onTrackRecord(track.index) },
                 onPlay = { viewModel.onTrackPlay(track.index) },
                 onStop = { viewModel.onTrackStop(track.index) },
+                onToggleOneShot = { viewModel.onToggleOneShot(track.index) },
                 onMuteToggle = { viewModel.onMuteToggle(track.index) },
                 onSoloToggle = { viewModel.onSoloToggle(track.index) },
                 onVolumeChange = { viewModel.onVolumeChange(track.index, it) },
