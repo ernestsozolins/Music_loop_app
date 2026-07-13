@@ -270,6 +270,27 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetReverbMix
   if (AudioEngine* engine = fromHandle(handle)) engine->setReverbMix(mix);
 }
 
+// ----- Filter FX -----
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetFilterEnabled(
+    JNIEnv*, jobject, jlong handle, jboolean enabled) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setFilterEnabled(enabled);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetFilterCutoff(
+    JNIEnv*, jobject, jlong handle, jfloat hz) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setFilterCutoff(hz);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetFilterResonance(
+    JNIEnv*, jobject, jlong handle, jfloat r) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setFilterResonance(r);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetFilterMode(
+    JNIEnv*, jobject, jlong handle, jint mode) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setFilterMode(mode);
+}
+
 JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetReverbDamping(
     JNIEnv*, jobject, jlong handle, jfloat damping) {
   if (AudioEngine* engine = fromHandle(handle)) engine->setReverbDamping(damping);

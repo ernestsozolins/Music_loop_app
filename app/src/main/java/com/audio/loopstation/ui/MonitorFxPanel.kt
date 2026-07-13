@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
@@ -18,7 +19,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.audio.loopstation.AudioEngine
 import com.audio.loopstation.ui.MainViewModel.CalibrationUiState
+import com.audio.loopstation.ui.MainViewModel.FilterUiState
 import com.audio.loopstation.ui.MainViewModel.ReverbUiState
 
 /**
@@ -30,11 +33,16 @@ import com.audio.loopstation.ui.MainViewModel.ReverbUiState
 @Composable
 fun MonitorFxPanel(
     reverb: ReverbUiState,
+    filter: FilterUiState,
     calibration: CalibrationUiState,
     monitorLevel: Float,
     onMonitorLevelChange: (Float) -> Unit,
     onMixChange: (Float) -> Unit,
     onRoomSizeChange: (Float) -> Unit,
+    onFilterToggle: () -> Unit,
+    onFilterCutoff: (Float) -> Unit,
+    onFilterResonance: (Float) -> Unit,
+    onFilterMode: (AudioEngine.FilterMode) -> Unit,
     onCalibrate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -57,6 +65,32 @@ fun MonitorFxPanel(
             )
             FxSlider(label = "Mix", value = reverb.mix, onChange = onMixChange)
             FxSlider(label = "Room", value = reverb.roomSize, onChange = onRoomSizeChange)
+
+            HorizontalDivider(Modifier.padding(vertical = 12.dp))
+
+            // Filter FX — sweepable low/high/band-pass on the monitor mix.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Filter", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.width(4.dp))
+                FilterChip(
+                    selected = filter.enabled,
+                    onClick = onFilterToggle,
+                    label = { Text(if (filter.enabled) "On" else "Off") },
+                )
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(top = 4.dp),
+            ) {
+                FilterModeChip("LP", AudioEngine.FilterMode.LOW_PASS, filter.mode, onFilterMode)
+                FilterModeChip("HP", AudioEngine.FilterMode.HIGH_PASS, filter.mode, onFilterMode)
+                FilterModeChip("BP", AudioEngine.FilterMode.BAND_PASS, filter.mode, onFilterMode)
+            }
+            FxSlider(label = "Freq", value = filter.cutoffNorm, onChange = onFilterCutoff)
+            FxSlider(label = "Res", value = filter.resonance, onChange = onFilterResonance)
 
             HorizontalDivider(Modifier.padding(vertical = 12.dp))
 
@@ -84,6 +118,20 @@ fun MonitorFxPanel(
             }
         }
     }
+}
+
+@Composable
+private fun FilterModeChip(
+    label: String,
+    mode: AudioEngine.FilterMode,
+    selected: AudioEngine.FilterMode,
+    onSelect: (AudioEngine.FilterMode) -> Unit,
+) {
+    FilterChip(
+        selected = mode == selected,
+        onClick = { onSelect(mode) },
+        label = { Text(label) },
+    )
 }
 
 @Composable

@@ -319,6 +319,16 @@ class AudioEngine private constructor(private var handle: Long) {
     /** Hard bypass (saves CPU); the tail restarts clean on re-enable. */
     fun setReverbEnabled(enabled: Boolean) { if (handle != 0L) nativeSetReverbEnabled(handle, enabled) }
 
+    /** Multimode filter FX (monitor/output only; recordings stay dry). */
+    enum class FilterMode { LOW_PASS, HIGH_PASS, BAND_PASS }
+
+    fun setFilterEnabled(enabled: Boolean) { if (handle != 0L) nativeSetFilterEnabled(handle, enabled) }
+    fun setFilterCutoff(hz: Float) { if (handle != 0L) nativeSetFilterCutoff(handle, hz) }
+    fun setFilterResonance(r: Float) { if (handle != 0L) nativeSetFilterResonance(handle, r) }
+    fun setFilterMode(mode: FilterMode) {
+        if (handle != 0L) nativeSetFilterMode(handle, mode.ordinal)
+    }
+
     // ------------------------------------------------------------------
     // Disk spooling — long-form capture and backing-track streaming.
     // All file I/O runs on the engine's DiskWriter/DiskReader threads.
@@ -798,6 +808,10 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeSetReverbRoomSize(handle: Long, size: Float)
     private external fun nativeSetReverbMix(handle: Long, mix: Float)
     private external fun nativeSetReverbDamping(handle: Long, damping: Float)
+    private external fun nativeSetFilterEnabled(handle: Long, enabled: Boolean)
+    private external fun nativeSetFilterCutoff(handle: Long, hz: Float)
+    private external fun nativeSetFilterResonance(handle: Long, r: Float)
+    private external fun nativeSetFilterMode(handle: Long, mode: Int)
     private external fun nativeSetReverbEnabled(handle: Long, enabled: Boolean)
 
     private external fun nativeStartCapture(handle: Long, path: String, captureMix: Boolean)

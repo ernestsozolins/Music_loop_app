@@ -46,6 +46,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     val transport by viewModel.transport.collectAsStateWithLifecycle()
     val tracks by viewModel.tracks.collectAsStateWithLifecycle()
     val reverb by viewModel.reverb.collectAsStateWithLifecycle()
+    val filterState by viewModel.filter.collectAsStateWithLifecycle()
     val calibration by viewModel.calibration.collectAsStateWithLifecycle()
     val trackWaveforms by viewModel.trackWaveforms.collectAsStateWithLifecycle()
     // The live waveform and playhead flows are deliberately NOT collected
@@ -250,11 +251,16 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
         val fxPanel: @Composable () -> Unit = {
             MonitorFxPanel(
                 reverb = reverb,
+                filter = filterState,
                 calibration = calibration,
                 monitorLevel = transport.monitorLevel,
                 onMonitorLevelChange = viewModel::onMonitorLevelChange,
                 onMixChange = viewModel::onReverbMixChange,
                 onRoomSizeChange = viewModel::onReverbRoomSizeChange,
+                onFilterToggle = viewModel::onFilterToggle,
+                onFilterCutoff = viewModel::onFilterCutoffChange,
+                onFilterResonance = viewModel::onFilterResonanceChange,
+                onFilterMode = viewModel::onFilterModeChange,
                 onCalibrate = viewModel::onCalibrateLatency,
             )
         }

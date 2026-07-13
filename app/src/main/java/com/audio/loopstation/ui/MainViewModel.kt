@@ -156,6 +156,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _reverb = MutableStateFlow(ReverbUiState())
     val reverb: StateFlow<ReverbUiState> = _reverb.asStateFlow()
 
+    /** Filter FX (monitor/output only; recordings stay dry). */
+    data class FilterUiState(
+        val enabled: Boolean = false,
+        val cutoffNorm: Float = 0.65f,  // 0..1 log position over 30 Hz..20 kHz
+        val resonance: Float = 0.2f,
+        val mode: AudioEngine.FilterMode = AudioEngine.FilterMode.LOW_PASS,
+    )
+
+    private val _filter = MutableStateFlow(FilterUiState())
+    val filter: StateFlow<FilterUiState> = _filter.asStateFlow()
+
     /** Latency-calibration state for the setup control. */
     data class CalibrationUiState(
         val running: Boolean = false,
@@ -840,6 +851,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         engine?.setReverbRoomSize(v) ?: return
         _reverb.update { it.copy(roomSize = v) }
     }
+
+    // ---- Filter FX ----
+
+    fun onFilterToggle() {
+        val on = !_filter.value.enabled
+        engine?.setFilterEnabled(on) ?: return
+        _filter.update { it.copy(enabled = on) }
+    }
+
+    fun onFilterCutoffChange(norm: Float) {
+        val n = norm.coerceIn(0f, 1f)
+        engine?.setFilterCutoff(filterNormToHz(n)) ?: return
+        _filter.update { it.copy(cutoffNorm = n) }
+    }
+
+    fun onFilterResonanceChange(r: Float) {
+        val v = r.coerceIn(0f, 1f)
+        engine?.setFilterResonance(v) ?: return
+        _filter.update { it.copy(resonance = v) }
+    }
+
+    fun onFilterModeChange(mode: AudioEngine.FilterMode) {
+        engine?.setFilterMode(mode) ?: return
+        _filter.update { it.copy(mode = mode) }
+    }
+
+    /** Log map of a 0..1 slider to 30 Hz..20 kHz. */
+    private fun filterNormToHz(norm: Float): Float =
+        (30.0 * Math.pow(20000.0 / 30.0, norm.toDouble())).toFloat()
 
     /**
      * Runs ping-and-listen round-trip calibration: the engine plays a short

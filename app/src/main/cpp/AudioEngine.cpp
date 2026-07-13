@@ -78,6 +78,7 @@ AudioEngine::AudioEngine(const Config& config) : mConfig(config) {
   mMetronome.configure(mConfig.sampleRate, mConfig.channelCount);
   mCalibrator.configure(mConfig.sampleRate, mConfig.channelCount);
   mReverb.configure(mConfig.sampleRate, mConfig.channelCount);
+  mFilter.configure(mConfig.sampleRate, mConfig.channelCount);
   mLimiter.configure(mConfig.sampleRate, mConfig.channelCount);
   mInputMapR.store(mConfig.channelCount > 1 ? 1 : 0, std::memory_order_relaxed);
   mOutputDeviceId.store(mConfig.outputDeviceId, std::memory_order_relaxed);
@@ -970,6 +971,10 @@ oboe::DataCallbackResult AudioEngine::onOutputReady(float* audioData, int32_t nu
   // takes and exported stems stay 100% dry by construction. The metronome
   // is added AFTER, keeping the click precise and un-reverberated.
   mReverb.process(audioData, numFrames);
+
+  // Filter FX on the same monitoring mix (after the reverb so it can shape the
+  // reverberated tail; before the metronome so the click stays clean/dry).
+  mFilter.process(audioData, numFrames);
 
   // ROUTING INVARIANT: the metronome is mixed into the OUTPUT buffer only,
   // strictly after renderLooper() has finished reading the input scratch and

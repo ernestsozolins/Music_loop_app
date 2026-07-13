@@ -39,6 +39,7 @@
 #include "Limiter.h"
 #include "LockFreeRing.h"
 #include "Metronome.h"
+#include "Filter.h"
 #include "Reverb.h"
 
 #include <algorithm>
@@ -264,6 +265,17 @@ class AudioEngine {
   void setReverbEnabled(bool enabled) { mReverb.setEnabled(enabled); }
   float reverbRoomSize() const { return mReverb.roomSize(); }
   float reverbMix() const { return mReverb.mix(); }
+
+  // Multimode resonant filter FX on the same MONITORING mix (recordings stay
+  // dry). mode: 0 = low-pass, 1 = high-pass, 2 = band-pass.
+  void setFilterEnabled(bool enabled) { mFilter.setEnabled(enabled); }
+  void setFilterCutoff(float hz) { mFilter.setCutoff(hz); }
+  void setFilterResonance(float r) { mFilter.setResonance(r); }
+  void setFilterMode(int32_t mode) { mFilter.setMode(static_cast<Filter::Mode>(mode)); }
+  bool filterEnabled() const { return mFilter.enabled(); }
+  float filterCutoff() const { return mFilter.cutoff(); }
+  float filterResonance() const { return mFilter.resonance(); }
+  int32_t filterMode() const { return mFilter.mode(); }
 
   // ----- Disk spooling (control thread; async — see DiskSpooler.h) -----
   // Spools the recorded input (or the full mix, pre-metronome, when
@@ -589,6 +601,9 @@ class AudioEngine {
 
   // Output-path-only monitoring reverb (never reaches the record path).
   Reverb mReverb;
+
+  // Output-path-only multimode filter FX (never reaches the record path).
+  Filter mFilter;
 
   // Output-path-only look-ahead master limiter (never reaches the record
   // path; the calibration ping passes through it so its 5 ms latency is
