@@ -95,6 +95,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val bpm: Int = 120,
         val beatsPerMeasure: Int = 4,
         val beatInBar: Int = 0,
+        val rhythmBeat: Boolean = false,  // false = click, true = drum backbeat
         val monitorLevel: Float = 0f,  // software input monitoring, 0..1
         val singleMode: Boolean = false,  // Single: one track sounds at a time
         val exporting: Boolean = false,
@@ -578,6 +579,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Lock-free hand-off; the engine applies it at the next beat boundary.
         engine.setMetronomeState(t.metronomeOn, bpm.toFloat(), t.beatsPerMeasure)
         _transport.update { it.copy(bpm = bpm) }
+    }
+
+    private val tapTimes = ArrayDeque<Long>()
+
+    /** Tap tempo: average the last few tap intervals into a BPM. */
+    fun onTapTempo() {
+        val engine = this.engine ?: return
+        val now = System.nanoTime()
+        // A long gap starts a fresh count.
+        if (tapTimes.isNotEmpty() && now - tapTimes.last() > 2_000_000_000L) tapTimes.clear()
+        tapTimes.addLast(now)
+        while (tapTimes.size > 5) tapTimes.removeFirst()
+        if (tapTimes.size < 2) return
+        val span = tapTimes.last() - tapTimes.first()
+        val intervals = tapTimes.size - 1
+        val bpmValue = (60.0 * 1_000_000_000.0 * intervals / span).toInt()
+        val bpm = bpmValue.coerceIn(MIN_BPM, MAX_BPM)
+        val t = _transport.value
+        engine.setMetronomeState(t.metronomeOn, bpm.toFloat(), t.beatsPerMeasure)
+        _transport.update { it.copy(bpm = bpm) }
+    }
+
+    /** Toggle the rhythm voice between a plain click and a drum backbeat. */
+    fun onToggleRhythmStyle() {
+        val engine = this.engine ?: return
+        val beat = !_transport.value.rhythmBeat
+        engine.setMetronomeStyle(
+            if (beat) AudioEngine.RhythmStyle.BEAT else AudioEngine.RhythmStyle.CLICK,
+        )
+        _transport.update { it.copy(rhythmBeat = beat) }
     }
 
     // ------------------------------------------------------------------

@@ -346,6 +346,11 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetMetronome
   if (AudioEngine* engine = fromHandle(handle)) engine->setMetronomeGain(gain);
 }
 
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetMetronomeStyle(
+    JNIEnv*, jobject, jlong handle, jint style) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setMetronomeStyle(style);
+}
+
 JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetMetronomeSync(
     JNIEnv*, jobject, jlong handle, jboolean enabled) {
   if (AudioEngine* engine = fromHandle(handle)) {

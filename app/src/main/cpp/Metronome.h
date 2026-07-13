@@ -49,14 +49,24 @@ class Metronome {
   static constexpr float kMaxBpm = 400.0f;
   static constexpr int32_t kMaxBeatsPerMeasure = 16;
 
+  // Rhythm voice style: a plain click, or a synthesized kick/snare/hat
+  // backbeat (a basic drum guide, no sample assets).
+  enum class Style : int32_t { Click = 0, Beat = 1 };
+
   // Control thread, before the streams start.
   void configure(int32_t sampleRate, int32_t channelCount) {
     mSampleRate = sampleRate;
     mChannels = channelCount;
     // Per-sample coefficient of an exponential decay that hits the silence
-    // floor after exactly kTickSeconds.
-    mDecay = std::exp(std::log(kSilenceFloor) / (kTickSeconds * static_cast<float>(sampleRate)));
+    // floor after a given tick length.
+    mDecay = decayFor(kTickSeconds);
+    mDecayKick = decayFor(0.12f);
+    mDecaySnare = decayFor(0.09f);
+    mDecayHat = decayFor(0.03f);
   }
+
+  void setStyle(Style style) { mStyle.store(static_cast<int32_t>(style), std::memory_order_relaxed); }
+  int32_t style() const { return mStyle.load(std::memory_order_relaxed); }
 
   // Control thread (any time, including mid-bar). One relaxed atomic store;
   // the audio thread folds the change in at the next beat boundary.
@@ -130,10 +140,15 @@ class Metronome {
         mCountdown -= 1.0;
       }
       if (mEnv > kSilenceFloor) {
-        const float s = std::sin(mPhase) * mEnv * gain;
-        mPhase += mPhaseInc;
-        if (mPhase > kTwoPi) mPhase -= kTwoPi;
-        mEnv *= mDecay;
+        float s;
+        if (mIsNoise) {
+          s = noise() * mEnv * gain;  // snare / hat
+        } else {
+          s = std::sin(mPhase) * mEnv * gain;  // click / kick
+          mPhase += mPhaseInc;
+          if (mPhase > kTwoPi) mPhase -= kTwoPi;
+        }
+        mEnv *= mEnvDecay;
         float* o = out + static_cast<size_t>(f) * mChannels;
         for (int32_t c = 0; c < mChannels; ++c) o[c] += s;
       }
@@ -142,6 +157,16 @@ class Metronome {
 
  private:
   static constexpr float kTwoPi = 6.283185307179586f;
+
+  float decayFor(float seconds) const {
+    return std::exp(std::log(kSilenceFloor) / (seconds * static_cast<float>(mSampleRate)));
+  }
+
+  // Cheap white noise (LCG) for the snare/hat voices, ~[-1, 1].
+  float noise() {
+    mRng = mRng * 1664525u + 1013904223u;
+    return static_cast<float>(static_cast<int32_t>(mRng >> 9) - 0x400000) / 4194304.0f;
+  }
 
   // Control word layout: [63..32] bpm (float bits), [15..8] beatsPerMeasure,
   // [0] active.
@@ -168,10 +193,30 @@ class Metronome {
     mCountdown += static_cast<double>(mSampleRate) * 60.0 / static_cast<double>(bpm);
     mBeatInBar = (mBeatInBar + 1) % beats;
 
-    const float freq = (mBeatInBar == 0) ? kDownbeatHz : kOffbeatHz;
     mPhase = 0.0f;  // sine from zero: no onset discontinuity
-    mPhaseInc = kTwoPi * freq / static_cast<float>(mSampleRate);
     mEnv = 1.0f;
+    if (mStyle.load(std::memory_order_relaxed) == static_cast<int32_t>(Style::Beat)) {
+      // Synthesized backbeat: kick on the downbeat, snare on the backbeat
+      // (mid-bar in 4+), hats elsewhere.
+      if (mBeatInBar == 0) {
+        mIsNoise = false;  // kick
+        mPhaseInc = kTwoPi * 60.0f / static_cast<float>(mSampleRate);
+        mEnvDecay = mDecayKick;
+      } else if (beats >= 4 && mBeatInBar == beats / 2) {
+        mIsNoise = true;  // snare
+        mEnvDecay = mDecaySnare;
+      } else {
+        mIsNoise = true;  // hat
+        mEnvDecay = mDecayHat;
+        mEnv = 0.6f;      // hats sit lower in the mix
+      }
+    } else {
+      // Plain click: sine, downbeat brighter than the offbeats.
+      mIsNoise = false;
+      const float freq = (mBeatInBar == 0) ? kDownbeatHz : kOffbeatHz;
+      mPhaseInc = kTwoPi * freq / static_cast<float>(mSampleRate);
+      mEnvDecay = mDecay;
+    }
 
     mBeatCountAtomic.fetch_add(1, std::memory_order_relaxed);
     mBeatInBarAtomic.store(mBeatInBar, std::memory_order_relaxed);
@@ -181,10 +226,14 @@ class Metronome {
   int32_t mSampleRate = 48000;
   int32_t mChannels = 2;
   float mDecay = 0.9957f;
+  float mDecayKick = 0.9984f;
+  float mDecaySnare = 0.9979f;
+  float mDecayHat = 0.9936f;
 
   // Control plane -> audio plane
   std::atomic<uint64_t> mControl{0};
   std::atomic<float> mGain{0.8f};
+  std::atomic<int32_t> mStyle{0};  // Style: 0 = click, 1 = beat
 
   // Audio-thread voice state
   double mCountdown = 0.0;
@@ -193,6 +242,9 @@ class Metronome {
   float mPhase = 0.0f;
   float mPhaseInc = 0.0f;
   float mEnv = 0.0f;
+  float mEnvDecay = 0.9957f;
+  bool mIsNoise = false;
+  uint32_t mRng = 0x1234567u;
 
   // Audio plane -> UI
   std::atomic<uint32_t> mBeatCountAtomic{0};

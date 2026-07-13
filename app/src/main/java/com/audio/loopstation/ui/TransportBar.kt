@@ -53,6 +53,8 @@ fun TransportBar(
     onStopTap: () -> Unit,
     onMetronomeToggle: () -> Unit,
     onBpmChange: (Int) -> Unit,
+    onTapTempo: () -> Unit,
+    onRhythmStyleToggle: () -> Unit,
     onExportTap: () -> Unit,
     onExportToFileTap: () -> Unit,
     onCountInToggle: () -> Unit,
@@ -133,6 +135,8 @@ fun TransportBar(
 
                 BpmAdjuster(bpm = transport.bpm, onBpmChange = onBpmChange)
 
+                TextButton(onClick = onTapTempo) { Text("Tap") }
+
                 FilledTonalIconButton(
                     onClick = onExportTap,
                     modifier = Modifier.size(TRANSPORT_BUTTON),
@@ -173,6 +177,11 @@ fun TransportBar(
                 AssistChip(
                     onClick = onTimeSignatureTap,
                     label = { Text("${transport.beatsPerMeasure}/4") },
+                )
+                FilterChip(
+                    selected = transport.rhythmBeat,
+                    onClick = onRhythmStyleToggle,
+                    label = { Text(if (transport.rhythmBeat) "Beat" else "Click") },
                 )
                 TextButton(onClick = onUndoTap) { Text("Undo") }
                 TextButton(onClick = onClearAllTap) { Text("Clear all") }

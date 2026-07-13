@@ -269,6 +269,13 @@ class AudioEngine private constructor(private var handle: Long) {
 
     fun setMetronomeGain(gain: Float) { if (handle != 0L) nativeSetMetronomeGain(handle, gain) }
 
+    /** Rhythm voice: CLICK or a synthesized kick/snare/hat BEAT. */
+    enum class RhythmStyle { CLICK, BEAT }
+
+    fun setMetronomeStyle(style: RhythmStyle) {
+        if (handle != 0L) nativeSetMetronomeStyle(handle, style.ordinal)
+    }
+
     /**
      * Phase-lock the click to the loop (default ON in the engine): while a
      * loop plays or is overdubbed, the loop start is bar 1 beat 1 and the
@@ -799,6 +806,7 @@ class AudioEngine private constructor(private var handle: Long) {
         beatsPerMeasure: Int,
     )
     private external fun nativeSetMetronomeGain(handle: Long, gain: Float)
+    private external fun nativeSetMetronomeStyle(handle: Long, style: Int)
     private external fun nativeSetMetronomeSync(handle: Long, enabled: Boolean)
     private external fun nativeSetCountInEnabled(handle: Long, enabled: Boolean)
     private external fun nativeSetLoopQuantize(handle: Long, enabled: Boolean)

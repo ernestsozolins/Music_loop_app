@@ -232,6 +232,10 @@ class AudioEngine {
   // next beat boundary — see Metronome.h) -----
   void setMetronomeState(bool active, float bpm, int32_t beatsPerMeasure);
   void setMetronomeGain(float gain);
+  // Rhythm voice: 0 = plain click, 1 = synthesized kick/snare/hat backbeat.
+  void setMetronomeStyle(int32_t style) {
+    mMetronome.setStyle(static_cast<Metronome::Style>(style));
+  }
   // Phase-lock the metronome to the loop: while a loop is playing or being
   // overdubbed, the loop start is treated as bar 1 beat 1 and the beat grid
   // re-anchors on every loop wrap (default ON — a free-running click drifts
