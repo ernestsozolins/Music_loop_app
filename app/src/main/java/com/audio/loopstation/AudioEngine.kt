@@ -345,6 +345,11 @@ class AudioEngine private constructor(private var handle: Long) {
         if (handle != 0L) nativeSetFilterMode(handle, mode.ordinal)
     }
 
+    /** Tuning / practice drone (output only; never recorded). */
+    fun setDroneEnabled(enabled: Boolean) { if (handle != 0L) nativeSetDroneEnabled(handle, enabled) }
+    fun setDroneFrequency(hz: Float) { if (handle != 0L) nativeSetDroneFrequency(handle, hz) }
+    fun setDroneGain(gain: Float) { if (handle != 0L) nativeSetDroneGain(handle, gain) }
+
     // ------------------------------------------------------------------
     // Disk spooling — long-form capture and backing-track streaming.
     // All file I/O runs on the engine's DiskWriter/DiskReader threads.
@@ -831,6 +836,9 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeSetFilterCutoff(handle: Long, hz: Float)
     private external fun nativeSetFilterResonance(handle: Long, r: Float)
     private external fun nativeSetFilterMode(handle: Long, mode: Int)
+    private external fun nativeSetDroneEnabled(handle: Long, enabled: Boolean)
+    private external fun nativeSetDroneFrequency(handle: Long, hz: Float)
+    private external fun nativeSetDroneGain(handle: Long, gain: Float)
     private external fun nativeSetReverbEnabled(handle: Long, enabled: Boolean)
 
     private external fun nativeStartCapture(handle: Long, path: String, captureMix: Boolean)

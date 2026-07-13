@@ -49,6 +49,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     val tracks by viewModel.tracks.collectAsStateWithLifecycle()
     val reverb by viewModel.reverb.collectAsStateWithLifecycle()
     val filterState by viewModel.filter.collectAsStateWithLifecycle()
+    val droneState by viewModel.drone.collectAsStateWithLifecycle()
     val calibration by viewModel.calibration.collectAsStateWithLifecycle()
     val trackWaveforms by viewModel.trackWaveforms.collectAsStateWithLifecycle()
     // The live waveform and playhead flows are deliberately NOT collected
@@ -261,6 +262,8 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
             MonitorFxPanel(
                 reverb = reverb,
                 filter = filterState,
+                drone = droneState,
+                droneNotes = viewModel.droneNotes,
                 calibration = calibration,
                 monitorLevel = transport.monitorLevel,
                 onMonitorLevelChange = viewModel::onMonitorLevelChange,
@@ -270,6 +273,9 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 onFilterCutoff = viewModel::onFilterCutoffChange,
                 onFilterResonance = viewModel::onFilterResonanceChange,
                 onFilterMode = viewModel::onFilterModeChange,
+                onDroneToggle = viewModel::onDroneToggle,
+                onDroneNote = viewModel::onDroneNote,
+                onDroneGain = viewModel::onDroneGain,
                 onCalibrate = viewModel::onCalibrateLatency,
             )
         }

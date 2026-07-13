@@ -79,6 +79,7 @@ AudioEngine::AudioEngine(const Config& config) : mConfig(config) {
   mCalibrator.configure(mConfig.sampleRate, mConfig.channelCount);
   mReverb.configure(mConfig.sampleRate, mConfig.channelCount);
   mFilter.configure(mConfig.sampleRate, mConfig.channelCount);
+  mDrone.configure(mConfig.sampleRate, mConfig.channelCount);
   mLimiter.configure(mConfig.sampleRate, mConfig.channelCount);
   mInputMapR.store(mConfig.channelCount > 1 ? 1 : 0, std::memory_order_relaxed);
   mOutputDeviceId.store(mConfig.outputDeviceId, std::memory_order_relaxed);
@@ -987,6 +988,10 @@ oboe::DataCallbackResult AudioEngine::onOutputReady(float* audioData, int32_t nu
                        stateAtBlockStart == EngineState::Overdubbing);
   mMetronome.render(audioData, numFrames, locked ? playheadAtBlockStart : -1,
                     locked ? loopLenAtBlockStart : 0);
+
+  // Tuning / practice drone — output only, same routing invariant as the
+  // metronome (added after both capture tees, so it is never recorded).
+  mDrone.process(audioData, numFrames);
 
   // Look-ahead master limiter on the monitoring mix (loops + monitor +
   // backing + metronome). Transparent gain reduction replaces hard clipping

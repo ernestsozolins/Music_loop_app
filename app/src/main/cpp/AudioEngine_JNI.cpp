@@ -297,6 +297,22 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetFilterMod
   if (AudioEngine* engine = fromHandle(handle)) engine->setFilterMode(mode);
 }
 
+// ----- Tuning / practice drone -----
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetDroneEnabled(
+    JNIEnv*, jobject, jlong handle, jboolean enabled) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setDroneEnabled(enabled);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetDroneFrequency(
+    JNIEnv*, jobject, jlong handle, jfloat hz) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setDroneFrequency(hz);
+}
+
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetDroneGain(
+    JNIEnv*, jobject, jlong handle, jfloat gain) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setDroneGain(gain);
+}
+
 JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetReverbDamping(
     JNIEnv*, jobject, jlong handle, jfloat damping) {
   if (AudioEngine* engine = fromHandle(handle)) engine->setReverbDamping(damping);

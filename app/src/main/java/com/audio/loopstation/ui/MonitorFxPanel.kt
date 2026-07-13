@@ -1,5 +1,6 @@
 package com.audio.loopstation.ui
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -21,6 +23,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.audio.loopstation.AudioEngine
 import com.audio.loopstation.ui.MainViewModel.CalibrationUiState
+import com.audio.loopstation.ui.MainViewModel.DroneNote
+import com.audio.loopstation.ui.MainViewModel.DroneUiState
 import com.audio.loopstation.ui.MainViewModel.FilterUiState
 import com.audio.loopstation.ui.MainViewModel.ReverbUiState
 
@@ -34,6 +38,8 @@ import com.audio.loopstation.ui.MainViewModel.ReverbUiState
 fun MonitorFxPanel(
     reverb: ReverbUiState,
     filter: FilterUiState,
+    drone: DroneUiState,
+    droneNotes: List<DroneNote>,
     calibration: CalibrationUiState,
     monitorLevel: Float,
     onMonitorLevelChange: (Float) -> Unit,
@@ -43,6 +49,9 @@ fun MonitorFxPanel(
     onFilterCutoff: (Float) -> Unit,
     onFilterResonance: (Float) -> Unit,
     onFilterMode: (AudioEngine.FilterMode) -> Unit,
+    onDroneToggle: () -> Unit,
+    onDroneNote: (Float) -> Unit,
+    onDroneGain: (Float) -> Unit,
     onCalibrate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -91,6 +100,43 @@ fun MonitorFxPanel(
             }
             FxSlider(label = "Freq", value = filter.cutoffNorm, onChange = onFilterCutoff)
             FxSlider(label = "Res", value = filter.resonance, onChange = onFilterResonance)
+
+            HorizontalDivider(Modifier.padding(vertical = 12.dp))
+
+            // Tuning / practice drone — tune the cello to it or play over it.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Tuning drone", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.width(4.dp))
+                FilterChip(
+                    selected = drone.enabled,
+                    onClick = onDroneToggle,
+                    label = { Text(if (drone.enabled) "On" else "Off") },
+                )
+            }
+            Text(
+                "Sustained reference to tune each open string to, or a tonic to " +
+                    "improvise over. Output only — never recorded.",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .padding(top = 4.dp)
+                    .horizontalScroll(rememberScrollState()),
+            ) {
+                droneNotes.forEach { note ->
+                    FilterChip(
+                        selected = drone.hz == note.hz,
+                        onClick = { onDroneNote(note.hz) },
+                        label = { Text(note.label) },
+                    )
+                }
+            }
+            FxSlider(label = "Level", value = drone.gain, onChange = onDroneGain)
 
             HorizontalDivider(Modifier.padding(vertical = 12.dp))
 

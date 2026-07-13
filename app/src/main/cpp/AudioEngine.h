@@ -39,6 +39,7 @@
 #include "Limiter.h"
 #include "LockFreeRing.h"
 #include "Metronome.h"
+#include "Drone.h"
 #include "Filter.h"
 #include "Reverb.h"
 
@@ -285,6 +286,14 @@ class AudioEngine {
   float filterCutoff() const { return mFilter.cutoff(); }
   float filterResonance() const { return mFilter.resonance(); }
   int32_t filterMode() const { return mFilter.mode(); }
+
+  // Tuning / practice drone (output only; never recorded). A sustained tone
+  // to tune the cello to, or to improvise over.
+  void setDroneEnabled(bool enabled) { mDrone.setEnabled(enabled); }
+  void setDroneFrequency(float hz) { mDrone.setFrequency(hz); }
+  void setDroneGain(float gain) { mDrone.setGain(gain); }
+  bool droneEnabled() const { return mDrone.enabled(); }
+  float droneFrequency() const { return mDrone.frequency(); }
 
   // ----- Disk spooling (control thread; async — see DiskSpooler.h) -----
   // Spools the recorded input (or the full mix, pre-metronome, when
@@ -613,6 +622,9 @@ class AudioEngine {
 
   // Output-path-only multimode filter FX (never reaches the record path).
   Filter mFilter;
+
+  // Output-path-only tuning/practice drone (never reaches the record path).
+  Drone mDrone;
 
   // Output-path-only look-ahead master limiter (never reaches the record
   // path; the calibration ping passes through it so its 5 ms latency is

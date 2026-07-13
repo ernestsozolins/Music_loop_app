@@ -174,6 +174,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _filter = MutableStateFlow(FilterUiState())
     val filter: StateFlow<FilterUiState> = _filter.asStateFlow()
 
+    /** Tuning / practice drone (output only; tune the cello or play over it). */
+    data class DroneUiState(
+        val enabled: Boolean = false,
+        val hz: Float = 220f,   // A3 — the cello tuning reference
+        val gain: Float = 0.5f,
+    )
+
+    /** Cello open strings (C2 G2 D3 A3) plus the concert-A reference. */
+    data class DroneNote(val label: String, val hz: Float)
+    val droneNotes = listOf(
+        DroneNote("C", 65.41f),
+        DroneNote("G", 98.00f),
+        DroneNote("D", 146.83f),
+        DroneNote("A", 220.00f),
+        DroneNote("A=440", 440.00f),
+    )
+
+    private val _drone = MutableStateFlow(DroneUiState())
+    val drone: StateFlow<DroneUiState> = _drone.asStateFlow()
+
     /** Latency-calibration state for the setup control. */
     data class CalibrationUiState(
         val running: Boolean = false,
@@ -946,6 +966,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Log map of a 0..1 slider to 30 Hz..20 kHz. */
     private fun filterNormToHz(norm: Float): Float =
         (30.0 * Math.pow(20000.0 / 30.0, norm.toDouble())).toFloat()
+
+    // ---- Tuning / practice drone ----
+
+    fun onDroneToggle() {
+        val on = !_drone.value.enabled
+        engine?.setDroneEnabled(on) ?: return
+        _drone.update { it.copy(enabled = on) }
+    }
+
+    fun onDroneNote(hz: Float) {
+        engine?.setDroneFrequency(hz) ?: return
+        _drone.update { it.copy(hz = hz) }
+    }
+
+    fun onDroneGain(gain: Float) {
+        val v = gain.coerceIn(0f, 1f)
+        engine?.setDroneGain(v) ?: return
+        _drone.update { it.copy(gain = v) }
+    }
 
     /**
      * Runs ping-and-listen round-trip calibration: the engine plays a short
