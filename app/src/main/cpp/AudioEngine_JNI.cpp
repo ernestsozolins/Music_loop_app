@@ -238,6 +238,12 @@ JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetTrackTran
   return engine != nullptr ? static_cast<jint>(engine->trackTransport(track)) : 0;
 }
 
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetTrackPosition(
+    JNIEnv*, jobject, jlong handle, jint track) {
+  AudioEngine* engine = fromHandle(handle);
+  return engine != nullptr ? engine->trackPositionFrames(track) : 0;
+}
+
 JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeClearAll(JNIEnv*, jobject,
                                                                              jlong handle) {
   if (AudioEngine* engine = fromHandle(handle)) engine->clearAll();

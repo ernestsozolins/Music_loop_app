@@ -135,6 +135,26 @@ fun TrackRow(
                         },
                     )
                 }
+                // Duration readout: live elapsed (red, counting up) while
+                // recording; the finished recorded length once it has content.
+                val isRecording = track.transport == TrackTransport.RECORDING
+                val timeLabel = when {
+                    isRecording -> formatDuration(track.recElapsedMs)
+                    track.hasContent -> formatDuration(track.recordedLengthMs)
+                    else -> ""
+                }
+                if (timeLabel.isNotEmpty()) {
+                    Text(
+                        text = timeLabel,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = if (isRecording) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    )
+                }
                 ToggleChip(label = "M", checked = track.muted, onToggle = onMuteToggle)
                 Spacer(Modifier.width(8.dp))
                 ToggleChip(label = "S", checked = track.soloed, onToggle = onSoloToggle)
@@ -335,3 +355,12 @@ private fun LabeledSlider(
 
 private const val NUDGE_MS = 10  // per-tap start-shift step
 private val TRACK_BUTTON = 52.dp  // per-track transport button size
+
+/** Milliseconds → "M:SS.d" (minutes : seconds . tenths). */
+private fun formatDuration(ms: Int): String {
+    val totalTenths = (ms.coerceAtLeast(0) + 50) / 100  // round to a tenth
+    val minutes = totalTenths / 600
+    val seconds = (totalTenths / 10) % 60
+    val tenths = totalTenths % 10
+    return "%d:%02d.%d".format(minutes, seconds, tenths)
+}

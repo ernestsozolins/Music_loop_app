@@ -74,6 +74,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val trimEndMs: Int = 0,
         // Playback mode: false = loop, true = 1-shot (play once then stop).
         val oneShot: Boolean = false,
+        // Live recording elapsed (ms) while this track is recording (throttled
+        // to 100 ms so only the recording row recomposes), and the finished
+        // recorded length (ms) once it holds content.
+        val recElapsedMs: Int = 0,
+        val recordedLengthMs: Int = 0,
     )
 
     // NOTE: the playhead position deliberately does NOT live here. It
@@ -437,14 +442,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         val mask = engine.trackContentMask
+        val rate = engine.sampleRate
+        val loopMs = if (rate > 0) (loopLen.toLong() * 1000L / rate).toInt() else 0
+        // Master-take elapsed rides on the global playhead (the take defining
+        // the loop length); fixed takes carry their own record cursor.
+        val masterRecMs = if (rate > 0) (playhead.toLong() * 1000L / rate).toInt() else 0
         _tracks.update { list ->
             list.map { t ->
+                val tp = engine.trackTransport(t.index)
+                val recording = tp == AudioEngine.TrackTransport.RECORDING
+                val elapsed = when {
+                    !recording -> 0
+                    loopLen == 0 -> masterRecMs  // first (master) take, still growing
+                    rate > 0 -> (engine.trackPositionFrames(t.index).toLong() * 1000L / rate).toInt()
+                    else -> 0
+                }
                 t.copy(
                     hasContent = mask and (1 shl t.index) != 0,
                     isClearing = mask and (1 shl (t.index + 16)) != 0,
-                    transport = engine.trackTransport(t.index),  // per-track play/rec/stop
+                    transport = tp,  // per-track play/rec/stop
                     trimStartMs = engine.trackTrimStartMillis(t.index),
                     trimEndMs = engine.trackTrimEndMillis(t.index),
+                    recElapsedMs = elapsed / 100 * 100,  // 100 ms steps: dedup-friendly
+                    recordedLengthMs = if (mask and (1 shl t.index) != 0) loopMs else 0,
                 )
             }
         }
@@ -464,7 +484,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // loaded); the data-class equality dedup means an unchanged snapshot
         // never reaches collectors, so this cannot recompose per frame.
         if (_backingTracks.value.any { it.copying || it.state != AudioEngine.BackingTrackState.EMPTY }) {
-            val rate = engine.sampleRate
             _backingTracks.update { list ->
                 list.map { bt ->
                     val native = engine.backingTrackState(bt.slot)

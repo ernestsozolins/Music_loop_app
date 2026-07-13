@@ -249,6 +249,10 @@ class AudioEngine private constructor(private var handle: Long) {
     fun trackTransport(track: Int): TrackTransport =
         TrackTransport.fromNative(if (handle != 0L) nativeGetTrackTransport(handle, track) else 0)
 
+    /** This track's playhead / record cursor in frames (for the UI timer). */
+    fun trackPositionFrames(track: Int): Int =
+        if (handle != 0L) nativeGetTrackPosition(handle, track) else 0
+
     fun clearAll() { if (handle != 0L) nativeClearAll(handle) }
     fun clearTrack(track: Int) { if (handle != 0L) nativeClearTrack(handle, track) }
 
@@ -795,6 +799,7 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativePlayAll(handle: Long)
     private external fun nativeStopAll(handle: Long)
     private external fun nativeGetTrackTransport(handle: Long, track: Int): Int
+    private external fun nativeGetTrackPosition(handle: Long, track: Int): Int
     private external fun nativeClearAll(handle: Long)
     private external fun nativeClearTrack(handle: Long, track: Int)
     private external fun nativeResetLoopForRestore(handle: Long)
