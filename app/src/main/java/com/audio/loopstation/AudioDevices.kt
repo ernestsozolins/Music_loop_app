@@ -60,6 +60,11 @@ object AudioDevices {
         AudioDeviceInfo.TYPE_WIRED_HEADSET -> "Wired headset"
         AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "Bluetooth"
         AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth (call)"
+        // Bluetooth LE Audio (API 31/33) — many current earbuds/speakers use
+        // this instead of A2DP; without these they never show in the picker.
+        AudioDeviceInfo.TYPE_BLE_HEADSET -> "Bluetooth LE"
+        AudioDeviceInfo.TYPE_BLE_SPEAKER -> "Bluetooth LE speaker"
+        AudioDeviceInfo.TYPE_BLE_BROADCAST -> "Bluetooth LE broadcast"
         AudioDeviceInfo.TYPE_USB_DEVICE -> "USB audio"
         AudioDeviceInfo.TYPE_USB_HEADSET -> "USB headset"
         AudioDeviceInfo.TYPE_USB_ACCESSORY -> "USB accessory"

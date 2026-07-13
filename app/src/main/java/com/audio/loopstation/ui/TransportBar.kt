@@ -157,7 +157,12 @@ fun TransportBar(
                 FilterChip(
                     selected = transport.countIn,
                     onClick = onCountInToggle,
-                    label = { Text("Count-in") },
+                    label = {
+                        Text(
+                            if (transport.countIn) "Count-in ${transport.countInBars} bar"
+                            else "Count-in off",
+                        )
+                    },
                 )
                 FilterChip(
                     selected = transport.quantize,

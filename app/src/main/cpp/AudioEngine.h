@@ -242,12 +242,17 @@ class AudioEngine {
   // against an unquantized loop). While recording the master loop, or when
   // no loop exists, the metronome free-runs regardless.
   void setMetronomeSyncToLoop(bool enabled);
-  // With the metronome active: master recording starts at the next downbeat
-  // (EngineState::CountIn bridges the wait; press record again to cancel).
-  // No effect when the click is off. Default ON.
+  // When enabled, the FIRST take counts in before recording: the click is
+  // auto-started if needed, `bars` full bars are counted, and recording
+  // begins exactly on the following downbeat (EngineState::CountIn bridges
+  // the wait; press record again to cancel). Default ON, 1 bar.
   void setCountInEnabled(bool enabled) {
     mCountInEnabled.store(enabled, std::memory_order_relaxed);
   }
+  void setCountInBars(int32_t bars) {
+    mCountInBars.store(bars < 1 ? 1 : (bars > 8 ? 8 : bars), std::memory_order_relaxed);
+  }
+  int32_t countInBars() const { return mCountInBars.load(std::memory_order_relaxed); }
   // With the metronome active: the master loop length is rounded to whole
   // bars — stopping early keeps recording to the bar line, stopping late
   // trims back to the nearest bar. No effect when the click is off.
@@ -614,10 +619,16 @@ class AudioEngine {
   // included in the measured record offset).
   Limiter mLimiter;
 
-  // Count-in + bar quantization (both gated on the metronome being active).
+  // Count-in + bar quantization.
   std::atomic<bool> mCountInEnabled{true};
   std::atomic<bool> mQuantizeBars{true};
-  uint32_t mCountInStartBeat = 0;  // audio thread only
+  std::atomic<int32_t> mCountInBars{1};  // count-in length in bars
+  // Count-in counting state (audio thread only): whether the first count
+  // downbeat has been seen, how many count bars remain, and the last beat
+  // count observed (for downbeat edge detection).
+  bool mCountInStarted = false;
+  int32_t mCountInRemaining = 0;
+  uint32_t mCountInLastBeat = 0;
   int32_t mMasterStopAt = 0;       // audio thread only; 0 = no scheduled stop
 
   // Current routing (mirrors mConfig.*DeviceId for lock-free UI reads;

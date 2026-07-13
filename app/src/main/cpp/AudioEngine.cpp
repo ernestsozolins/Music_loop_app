@@ -1446,11 +1446,20 @@ void AudioEngine::armRecordTrack(int32_t track) {
     t.recPos = 0;
     t.pos = 0;
     setPlayhead(0);
-    if (mCountInEnabled.load(std::memory_order_relaxed) && mMetronome.isActive()) {
-      // Wait for the next downbeat before capturing, so the loop starts on
-      // the bar. The intervening clicks are the count-in.
+    if (mCountInEnabled.load(std::memory_order_relaxed)) {
+      // Count in before capturing, so the loop starts on a downbeat. Auto-start
+      // the click if it is off, so the count-in always has a beat (and the take
+      // is bar-quantizable). Recording begins after `mCountInBars` full bars.
+      if (!mMetronome.isActive()) {
+        float bpm = 120.0f;
+        int32_t beats = 4;
+        mMetronome.tempo(bpm, beats);
+        mMetronome.setState(true, bpm, beats);  // fires an immediate downbeat
+      }
       mCountInTrack = track;
-      mCountInStartBeat = mMetronome.beatCount();
+      mCountInStarted = false;
+      mCountInRemaining = mCountInBars.load(std::memory_order_relaxed);
+      mCountInLastBeat = mMetronome.beatCount();
       mState.store(EngineState::CountIn, std::memory_order_relaxed);
     } else {
       t.transport.store(static_cast<uint8_t>(TrackTransport::Recording),
@@ -1499,21 +1508,20 @@ int32_t AudioEngine::barFramesOrZero() const {
   return static_cast<int32_t>(beatFrames * beats + 0.5);
 }
 
-// Master-recording stop: bar-round the length when quantization is on.
-// Trims a late stop back to the nearest bar immediately; a short stop keeps
-// recording until the bar line (mMasterStopAt) and finalizes there.
+// Master-recording stop: snap the loop length to a WHOLE number of bars so it
+// always ends on a full bar. Recording stops immediately (never past the
+// button press): a stop just after a downbeat is trimmed back to it; a stop
+// mid-bar rounds to the nearest bar and pads the short remainder with silence
+// (the take started on a downbeat, so the buffer past the stop is clean). This
+// keeps everything the performer played and never surprises them by recording
+// on after Stop.
 void AudioEngine::finalizeMasterOrQuantize() {
   const int32_t barFrames =
       mQuantizeBars.load(std::memory_order_relaxed) ? barFramesOrZero() : 0;
   if (barFrames > 0 && mMasterRecordPos > 0) {
-    int32_t bars = (mMasterRecordPos + barFrames / 2) / barFrames;
-    if (bars < 1) bars = 1;
-    const int32_t target = std::min(bars * barFrames, mMaxLoopFrames);
-    if (target > mMasterRecordPos) {
-      mMasterStopAt = target;  // keep recording to the bar line
-      return;
-    }
-    mMasterRecordPos = target;  // trim a late stop back to the bar
+    int32_t bars = (mMasterRecordPos + barFrames / 2) / barFrames;  // nearest bar
+    if (bars < 1) bars = 1;  // a sub-bar take still becomes a 1-bar loop
+    mMasterRecordPos = std::min(bars * barFrames, mMaxLoopFrames);
   }
   finalizeMasterLoop();
 }
@@ -1577,15 +1585,27 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
 
   const EngineState st = mState.load(std::memory_order_relaxed);
 
-  // ---- Count-in: hold until the next downbeat, then begin the master take.
+  // ---- Count-in: count `mCountInBars` full bars of clicks, then begin the
+  // master take exactly on the following downbeat. The metronome renders after
+  // this function, so its beat state here is from the previous callback and
+  // recording begins within one callback of the downbeat.
   if (st == EngineState::CountIn) {
-    // The metronome renders after this function; its beat state here is from
-    // the previous callback, so recording begins within one callback of the
-    // downbeat. If the click was switched off mid-count-in the beat counter
-    // freezes, so fall through to recording rather than soft-locking.
-    const bool downbeat =
-        mMetronome.beatCount() > mCountInStartBeat && mMetronome.beatInBar() == 0;
-    if (downbeat || !mMetronome.isActive()) {
+    bool startNow = false;
+    const uint32_t bc = mMetronome.beatCount();
+    if (bc != mCountInLastBeat) {  // a new beat fired
+      mCountInLastBeat = bc;
+      if (mMetronome.beatInBar() == 0) {  // ...and it was a downbeat
+        if (!mCountInStarted) {
+          mCountInStarted = true;  // first count bar begins
+        } else if (--mCountInRemaining <= 0) {
+          startNow = true;  // counted the requested bars — record on this bar
+        }
+      }
+    }
+    // If the click was switched off mid-count-in the beat counter freezes,
+    // so start rather than soft-locking.
+    if (!mMetronome.isActive()) startNow = true;
+    if (startNow) {
       mOverdubTrack = mCountInTrack;
       mMasterTrack = mCountInTrack;
       mMasterRecordPos = 0;

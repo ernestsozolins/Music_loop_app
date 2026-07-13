@@ -5,9 +5,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -178,6 +180,11 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     val onExportToFileTap: () -> Unit = { saveToFile.launch(viewModel.suggestedExportName()) }
 
     Scaffold(
+        // targetSdk 35 forces edge-to-edge, so inset the whole app into the
+        // safe area — otherwise the transport bar hides behind the system
+        // back/home navigation bar and the top hides under the status bar.
+        modifier = Modifier.safeDrawingPadding(),
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),  // handled by safeDrawingPadding above
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             TransportBar(

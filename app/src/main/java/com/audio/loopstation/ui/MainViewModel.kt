@@ -95,6 +95,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val loopLengthFrames: Int = 0,
         val metronomeOn: Boolean = false,
         val countIn: Boolean = true,
+        val countInBars: Int = 1,
         val quantize: Boolean = true,
         val syncToLoop: Boolean = true,
         val bpm: Int = 120,
@@ -569,9 +570,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun startRecordingWithSnapshot(engine: AudioEngine) {
         armedTrack = selectedTrackIndex()
         val track = armedTrack
+        ensureCountInClick(engine)
         viewModelScope.launch(Dispatchers.Default) {
             engine.snapshotTrackForUndo(track)  // pre-pass audio for Backspace
             engine.startRecording()
+        }
+    }
+
+    /**
+     * The first take counts in, which needs the click. If count-in is on but
+     * the metronome is off and no loop exists yet, turn the click on (and keep
+     * the UI in sync) so the count-in fires and the loop is bar-quantizable.
+     */
+    private fun ensureCountInClick(engine: AudioEngine) {
+        val t = _transport.value
+        if (t.countIn && !t.metronomeOn && !t.hasLoop) {
+            engine.setMetronomeState(true, t.bpm.toFloat(), t.beatsPerMeasure)
+            _transport.update { it.copy(metronomeOn = true) }
         }
     }
 
@@ -725,6 +740,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             engine.recordTrack(index)  // closing a pass — no snapshot needed
         } else {
             armedTrack = index
+            ensureCountInClick(engine)  // first take counts in
             // Snapshot the pre-pass audio for Backspace/undo (multi-MB, off-main).
             viewModelScope.launch(Dispatchers.Default) {
                 engine.snapshotTrackForUndo(index)
@@ -1125,10 +1141,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Metronome workflow toggles + smart loop button
     // ------------------------------------------------------------------
 
+    /** Cycle the count-in: Off → 1 bar → 2 bars → 4 bars → Off. */
     fun onCountInToggle() {
-        val on = !_transport.value.countIn
-        engine?.setCountInEnabled(on) ?: return
-        _transport.update { it.copy(countIn = on) }
+        val engine = this.engine ?: return
+        val t = _transport.value
+        val (on, bars) = when {
+            !t.countIn -> true to 1
+            t.countInBars <= 1 -> true to 2
+            t.countInBars <= 2 -> true to 4
+            else -> false to 1
+        }
+        engine.setCountInEnabled(on)
+        if (on) engine.setCountInBars(bars)
+        _transport.update { it.copy(countIn = on, countInBars = bars) }
     }
 
     fun onQuantizeToggle() {

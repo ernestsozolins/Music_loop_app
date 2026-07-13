@@ -369,6 +369,11 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetCountInEn
   if (AudioEngine* engine = fromHandle(handle)) engine->setCountInEnabled(enabled == JNI_TRUE);
 }
 
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetCountInBars(
+    JNIEnv*, jobject, jlong handle, jint bars) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setCountInBars(bars);
+}
+
 JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetLoopQuantize(
     JNIEnv*, jobject, jlong handle, jboolean enabled) {
   if (AudioEngine* engine = fromHandle(handle)) engine->setLoopQuantize(enabled == JNI_TRUE);

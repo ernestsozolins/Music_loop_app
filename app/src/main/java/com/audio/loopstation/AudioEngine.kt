@@ -295,6 +295,11 @@ class AudioEngine private constructor(private var handle: Long) {
         if (handle != 0L) nativeSetCountInEnabled(handle, enabled)
     }
 
+    /** Count-in length in bars (1..8). */
+    fun setCountInBars(bars: Int) {
+        if (handle != 0L) nativeSetCountInBars(handle, bars)
+    }
+
     /** With the click on, the master loop length is rounded to whole bars (default ON). */
     fun setLoopQuantize(enabled: Boolean) {
         if (handle != 0L) nativeSetLoopQuantize(handle, enabled)
@@ -814,6 +819,7 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeSetMetronomeStyle(handle: Long, style: Int)
     private external fun nativeSetMetronomeSync(handle: Long, enabled: Boolean)
     private external fun nativeSetCountInEnabled(handle: Long, enabled: Boolean)
+    private external fun nativeSetCountInBars(handle: Long, bars: Int)
     private external fun nativeSetLoopQuantize(handle: Long, enabled: Boolean)
     private external fun nativeSetInputChannels(handle: Long, channels: Int, mapLeft: Int, mapRight: Int)
     private external fun nativeGetBeatInfo(handle: Long): Long
