@@ -12,10 +12,12 @@ import com.audio.loopstation.StemExporter
 import com.audio.loopstation.data.LoopStationDatabase
 import com.audio.loopstation.data.SessionEntity
 import com.audio.loopstation.data.SessionRepository
+import com.audio.loopstation.data.SettingsStore
 import com.audio.loopstation.data.TrackEntity
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -25,6 +27,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -95,6 +100,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val isCountingIn: Boolean = false,
         val hasLoop: Boolean = false,
         val loopLengthFrames: Int = 0,
+        val loopBars: Int = 0,  // loop length in whole bars at the current tempo
         val metronomeOn: Boolean = false,
         val countIn: Boolean = true,
         val countInBars: Int = 1,
@@ -122,6 +128,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val exporter = StemExporter(application)
     private val repository = SessionRepository(LoopStationDatabase.get(application))
+    private val settings = SettingsStore(application)
+    private var settingsLoaded = false
 
     private var engine: AudioEngine? = null
     private var metersJob: Job? = null
@@ -300,11 +308,80 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Service connection (MainActivity's ServiceConnection calls these)
     // ------------------------------------------------------------------
 
+    /** Persist the transport/monitoring/FX settings (debounced) whenever they change. */
+    @OptIn(FlowPreview::class)
+    private val settingsSaver = viewModelScope.launch {
+        combine(_transport, _reverb, _filter, _drone, _manualLatencyMs) { _, _, _, _, _ ->
+            currentSettingsSnapshot()
+        }.drop(1).debounce(400L).collect { settings.save(it) }
+    }
+
+    private fun currentSettingsSnapshot(): SettingsStore.Snapshot {
+        val t = _transport.value
+        val r = _reverb.value
+        val f = _filter.value
+        val d = _drone.value
+        return SettingsStore.Snapshot(
+            bpm = t.bpm, beatsPerMeasure = t.beatsPerMeasure, countIn = t.countIn,
+            countInBars = t.countInBars, quantize = t.quantize, syncToLoop = t.syncToLoop,
+            singleMode = t.singleMode, rhythmBeat = t.rhythmBeat, monitorLevel = t.monitorLevel,
+            reverbMix = r.mix, reverbRoom = r.roomSize,
+            filterEnabled = f.enabled, filterCutoffNorm = f.cutoffNorm,
+            filterResonance = f.resonance, filterMode = f.mode.ordinal,
+            droneHz = d.hz, droneGain = d.gain, manualLatencyMs = _manualLatencyMs.value,
+        )
+    }
+
+    /** Loads saved settings once and applies them to the engine + UI state. */
+    private fun loadSettings(engine: AudioEngine) {
+        if (settingsLoaded) return
+        settingsLoaded = true
+        val s = settings.load()
+        engine.setMetronomeState(_transport.value.metronomeOn, s.bpm.toFloat(), s.beatsPerMeasure)
+        engine.setCountInEnabled(s.countIn)
+        engine.setCountInBars(s.countInBars)
+        engine.setLoopQuantize(s.quantize)
+        engine.setMetronomeSyncToLoop(s.syncToLoop)
+        engine.setSinglePlayMode(s.singleMode)
+        engine.setMetronomeStyle(
+            if (s.rhythmBeat) AudioEngine.RhythmStyle.BEAT else AudioEngine.RhythmStyle.CLICK,
+        )
+        engine.setMonitorGain(s.monitorLevel)
+        engine.setReverbMix(s.reverbMix)
+        engine.setReverbRoomSize(s.reverbRoom)
+        val mode = AudioEngine.FilterMode.entries.getOrElse(s.filterMode) {
+            AudioEngine.FilterMode.LOW_PASS
+        }
+        engine.setFilterEnabled(s.filterEnabled)
+        engine.setFilterCutoff(filterNormToHz(s.filterCutoffNorm))
+        engine.setFilterResonance(s.filterResonance)
+        engine.setFilterMode(mode)
+        engine.setDroneFrequency(s.droneHz)
+        engine.setDroneGain(s.droneGain)  // drone is NOT auto-enabled on launch
+        engine.setRecordOffsetMillis(s.manualLatencyMs)
+
+        _transport.update {
+            it.copy(
+                bpm = s.bpm, beatsPerMeasure = s.beatsPerMeasure, countIn = s.countIn,
+                countInBars = s.countInBars, quantize = s.quantize, syncToLoop = s.syncToLoop,
+                singleMode = s.singleMode, rhythmBeat = s.rhythmBeat, monitorLevel = s.monitorLevel,
+            )
+        }
+        _reverb.value = ReverbUiState(mix = s.reverbMix, roomSize = s.reverbRoom)
+        _filter.value = FilterUiState(
+            enabled = s.filterEnabled, cutoffNorm = s.filterCutoffNorm,
+            resonance = s.filterResonance, mode = mode,
+        )
+        _drone.value = DroneUiState(enabled = false, hz = s.droneHz, gain = s.droneGain)
+        _manualLatencyMs.value = s.manualLatencyMs
+    }
+
     /** Start observing the service-owned engine. Idempotent per instance. */
     fun attachEngine(engine: AudioEngine) {
         if (this.engine === engine) return
         detachEngine()
         this.engine = engine
+        loadSettings(engine)
         // This ViewModel survives configuration changes, so an existing
         // track list (the user's volume/pan/mute UI state) is kept; it is
         // only rebuilt when we meet a different engine (fresh process).
@@ -481,9 +558,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Auto-record disarms itself when it fires — reflect that in the UI.
         if (_autoRecordArmed.value && !engine.autoRecordArmed()) _autoRecordArmed.value = false
 
+        val rate = engine.sampleRate
+
         // …while the transport data class (structural equality => StateFlow
         // dedup) only emits on real state changes.
         _transport.update {
+            val barFrames = if (it.bpm > 0) rate.toDouble() * 60.0 / it.bpm * it.beatsPerMeasure else 0.0
+            val bars = if (barFrames > 0 && loopLen > 0) Math.round(loopLen / barFrames).toInt() else 0
             it.copy(
                 engineState = state,
                 isRecording = state == AudioEngine.State.RECORDING_MASTER ||
@@ -493,12 +574,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isCountingIn = state == AudioEngine.State.COUNT_IN,
                 hasLoop = loopLen > 0,
                 loopLengthFrames = loopLen,
+                loopBars = bars,
                 metronomeOn = m.metronomeActive,
                 beatInBar = m.beatInBar,
             )
         }
         val mask = engine.trackContentMask
-        val rate = engine.sampleRate
         val loopMs = if (rate > 0) (loopLen.toLong() * 1000L / rate).toInt() else 0
         // Master-take elapsed rides on the global playhead (the take defining
         // the loop length); fixed takes carry their own record cursor.
@@ -781,6 +862,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun onTrackSelect(index: Int) {
         engine?.selectTrack(index) ?: return
         _tracks.update { list -> list.map { it.copy(isSelected = it.index == index) } }
+    }
+
+    /** Rename a track (falls back to the default name when blank). */
+    fun onRenameTrack(index: Int, name: String) {
+        val clean = name.trim().take(24).ifBlank { "Track ${index + 1}" }
+        _tracks.update { list -> list.map { if (it.index == index) it.copy(name = clean) else it } }
     }
 
     // ---- Per-track transport (RC-505 channel-strip buttons) ----

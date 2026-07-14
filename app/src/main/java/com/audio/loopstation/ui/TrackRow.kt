@@ -29,6 +29,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.audio.loopstation.AudioEngine.TrackTransport
@@ -64,6 +66,8 @@ fun TrackRow(
     onTrim: () -> Unit,
     onNudge: (Int) -> Unit,
     onToggleFade: () -> Unit,
+    onRename: () -> Unit,
+    compact: Boolean = false,  // performance mode: hide secondary controls
     modifier: Modifier = Modifier,
 ) {
     Card(
@@ -174,20 +178,23 @@ fun TrackRow(
             )
 
             // Selected row: live input meter. Recorded rows: the actual loop
-            // audio (offline peaks). Empty rows: resting line.
-            when {
-                waveform != null -> WaveformVisualizer(
-                    waveform = waveform,
-                    modifier = Modifier.padding(vertical = 8.dp),
-                )
-                offlineWaveform != null -> StaticWaveform(
-                    bins = offlineWaveform,
-                    modifier = Modifier.padding(vertical = 8.dp),
-                )
-                else -> WaveformVisualizer(
-                    waveform = null,
-                    modifier = Modifier.padding(vertical = 8.dp),
-                )
+            // audio (offline peaks). Empty rows: resting line. Hidden in the
+            // compact performance layout.
+            if (!compact) {
+                when {
+                    waveform != null -> WaveformVisualizer(
+                        waveform = waveform,
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    )
+                    offlineWaveform != null -> StaticWaveform(
+                        bins = offlineWaveform,
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    )
+                    else -> WaveformVisualizer(
+                        waveform = null,
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    )
+                }
             }
 
             LabeledSlider(
@@ -196,15 +203,18 @@ fun TrackRow(
                 range = 0f..1f,
                 onChange = onVolumeChange,
             )
-            LabeledSlider(
-                label = "Pan",
-                value = track.pan,
-                range = -1f..1f,
-                onChange = onPanChange,
-            )
+            if (!compact) {
+                LabeledSlider(
+                    label = "Pan",
+                    value = track.pan,
+                    range = -1f..1f,
+                    onChange = onPanChange,
+                )
+            }
 
-            // Edit actions — only meaningful once the track holds audio.
-            if (track.hasContent) {
+            // Edit actions — only meaningful once the track holds audio, and
+            // hidden in the compact performance layout.
+            if (track.hasContent && !compact) {
                 // Live start-shift stepper: nudge timing without stopping.
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -231,6 +241,7 @@ fun TrackRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.padding(top = 4.dp),
                 ) {
+                    TextButton(onClick = onRename) { Text("Rename") }
                     TextButton(onClick = onTrim) { Text("Trim") }
                     TextButton(onClick = onToggleFade) {
                         Text(if (track.fadeMs > 0) "Fade ✓" else "Fade")
@@ -262,7 +273,15 @@ private fun TrackTransportBar(
         FilledIconButton(
             onClick = onRecord,
             enabled = !track.isClearing,
-            modifier = Modifier.size(TRACK_BUTTON),
+            modifier = Modifier
+                .size(TRACK_BUTTON)
+                .semantics {
+                    contentDescription = if (recording) {
+                        "Stop recording ${track.name}"
+                    } else {
+                        "Record ${track.name}"
+                    }
+                },
             colors = IconButtonDefaults.filledIconButtonColors(
                 containerColor = if (recording) {
                     MaterialTheme.colorScheme.error
@@ -285,7 +304,9 @@ private fun TrackTransportBar(
         FilledTonalIconButton(
             onClick = onPlay,
             enabled = track.hasContent && !track.isClearing,
-            modifier = Modifier.size(TRACK_BUTTON),
+            modifier = Modifier
+                .size(TRACK_BUTTON)
+                .semantics { contentDescription = "Play ${track.name} from the start" },
             colors = IconButtonDefaults.filledTonalIconButtonColors(
                 containerColor = if (playing) {
                     MaterialTheme.colorScheme.primary
@@ -304,7 +325,9 @@ private fun TrackTransportBar(
         FilledTonalIconButton(
             onClick = onStop,
             enabled = playing || recording,
-            modifier = Modifier.size(TRACK_BUTTON),
+            modifier = Modifier
+                .size(TRACK_BUTTON)
+                .semantics { contentDescription = "Stop ${track.name}" },
         ) {
             Text("■", style = MaterialTheme.typography.titleMedium)
         }

@@ -18,7 +18,11 @@ import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -203,37 +207,72 @@ fun MonitorFxPanel(
     }
 }
 
-/** Peak input meter with a peak-hold marker and a red clip zone (top ~5%). */
+/**
+ * Peak input meter with a decaying peak-hold marker and a clip indicator that
+ * latches for ~1.5 s, so a fast bow transient is easy to catch when setting
+ * gain. Everything is read in the draw phase (a vsync clock drives the decay),
+ * so it never recomposes the panel.
+ */
 @Composable
 private fun InputLevelMeter(level: StateFlow<Float>, modifier: Modifier = Modifier) {
     val trackColor = MaterialTheme.colorScheme.surfaceVariant
     val okColor = MaterialTheme.colorScheme.primary
     val hotColor = Color(0xFFE0A030)
     val clipColor = MaterialTheme.colorScheme.error
+    val holdColor = MaterialTheme.colorScheme.onSurface
+
     val peak = produceState(initialValue = 0f, level) { level.collect { value = it } }
+    val frameClock = remember { mutableLongStateOf(0L) }
+    LaunchedEffect(level) { while (true) withFrameNanos { frameClock.longValue = it } }
+    val hold = remember { PeakHold() }
+
     androidx.compose.foundation.layout.Spacer(
         modifier
             .fillMaxWidth()
             .height(18.dp)
             .drawBehind {
-                drawRect(trackColor)
+                val now = frameClock.longValue  // subscribe this draw scope to vsync
                 val v = peak.value.coerceIn(0f, 1f)
-                val w = size.width * v
+                hold.update(v, now)
+                drawRect(trackColor)
                 val color = when {
                     v >= 0.98f -> clipColor
                     v >= 0.8f -> hotColor
                     else -> okColor
                 }
-                drawRect(color, size = Size(w, size.height))
-                // Clip zone marker at 98%.
-                drawLine(
-                    clipColor,
-                    Offset(size.width * 0.98f, 0f),
-                    Offset(size.width * 0.98f, size.height),
-                    strokeWidth = 2f,
-                )
+                drawRect(color, size = Size(size.width * v, size.height))
+                // Decaying peak-hold marker.
+                val hx = size.width * hold.peak.coerceIn(0f, 1f)
+                drawLine(holdColor, Offset(hx, 0f), Offset(hx, size.height), strokeWidth = 3f)
+                // Latched clip zone (last ~5% of the bar) turns solid red on a clip.
+                if (hold.clipped(now)) {
+                    drawRect(
+                        clipColor,
+                        topLeft = Offset(size.width * 0.95f, 0f),
+                        size = Size(size.width * 0.05f, size.height),
+                    )
+                }
             },
     )
+}
+
+/** Draw-phase peak-hold + clip latch (plain object; mutated inside drawBehind). */
+private class PeakHold {
+    var peak = 0f
+        private set
+    private var clipUntil = 0L
+    private var lastNanos = 0L
+
+    fun update(v: Float, now: Long) {
+        if (lastNanos == 0L) lastNanos = now
+        val dt = (now - lastNanos).coerceAtLeast(0L)
+        lastNanos = now
+        peak = (peak - dt / 1_200_000_000f).coerceAtLeast(0f)  // ~1.2 s fall
+        if (v > peak) peak = v
+        if (v >= 0.98f) clipUntil = now + 1_500_000_000L  // latch 1.5 s
+    }
+
+    fun clipped(now: Long): Boolean = now < clipUntil
 }
 
 @Composable

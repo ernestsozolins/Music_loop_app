@@ -28,6 +28,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
@@ -64,6 +66,8 @@ fun TransportBar(
     autoRecordArmed: Boolean,
     onAutoRecordToggle: () -> Unit,
     onTunerTap: () -> Unit,
+    performanceMode: Boolean,
+    onPerformanceToggle: () -> Unit,
     onTimeSignatureTap: () -> Unit,
     onUndoTap: () -> Unit,
     onClearAllTap: () -> Unit,
@@ -86,7 +90,12 @@ fun TransportBar(
                 // Record: red while a take/overdub is running.
                 FilledIconButton(
                     onClick = onRecordTap,
-                    modifier = Modifier.size(TRANSPORT_BUTTON),
+                    modifier = Modifier
+                        .size(TRANSPORT_BUTTON)
+                        .semantics {
+                            contentDescription =
+                                if (transport.isRecording) "Stop recording" else "Record"
+                        },
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = if (transport.isRecording) {
                             MaterialTheme.colorScheme.error
@@ -114,7 +123,9 @@ fun TransportBar(
 
                 FilledTonalIconButton(
                     onClick = onStopTap,
-                    modifier = Modifier.size(TRANSPORT_BUTTON),
+                    modifier = Modifier
+                        .size(TRANSPORT_BUTTON)
+                        .semantics { contentDescription = "Stop all" },
                 ) {
                     StopGlyph(color = MaterialTheme.colorScheme.onSecondaryContainer)
                 }
@@ -195,6 +206,11 @@ fun TransportBar(
                     selected = transport.rhythmBeat,
                     onClick = onRhythmStyleToggle,
                     label = { Text(if (transport.rhythmBeat) "Beat" else "Click") },
+                )
+                FilterChip(
+                    selected = performanceMode,
+                    onClick = onPerformanceToggle,
+                    label = { Text("Performance") },
                 )
                 TextButton(onClick = onTunerTap) { Text("Tuner") }
                 TextButton(onClick = onUndoTap) { Text("Undo") }

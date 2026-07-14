@@ -16,9 +16,12 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -68,6 +71,9 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     var showInputs by remember { mutableStateOf(false) }
     var showTuner by remember { mutableStateOf(false) }
     var trimTarget by remember { mutableStateOf<Int?>(null) }
+    var renameTarget by remember { mutableStateOf<Int?>(null) }
+    var confirmClearAll by remember { mutableStateOf(false) }
+    var performanceMode by remember { mutableStateOf(false) }
 
     trimTarget?.let { index ->
         val track = tracks.firstOrNull { it.index == index }
@@ -133,6 +139,33 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 showInputs = false
             },
             onDismiss = { showInputs = false },
+        )
+    }
+
+    renameTarget?.let { index ->
+        val current = tracks.firstOrNull { it.index == index }?.name ?: "Track ${index + 1}"
+        RenameTrackDialog(
+            currentName = current,
+            onRename = { newName ->
+                viewModel.onRenameTrack(index, newName)
+                renameTarget = null
+            },
+            onDismiss = { renameTarget = null },
+        )
+    }
+
+    if (confirmClearAll) {
+        AlertDialog(
+            onDismissRequest = { confirmClearAll = false },
+            title = { Text("Clear everything?") },
+            text = { Text("This removes all recorded loops on every track. This can't be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.onClearAll()
+                    confirmClearAll = false
+                }) { Text("Clear all") }
+            },
+            dismissButton = { TextButton(onClick = { confirmClearAll = false }) { Text("Cancel") } },
         )
     }
 
@@ -224,9 +257,11 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                     viewModel.onTunerOpen()
                     showTuner = true
                 },
+                performanceMode = performanceMode,
+                onPerformanceToggle = { performanceMode = !performanceMode },
                 onTimeSignatureTap = viewModel::onTimeSignatureChange,
                 onUndoTap = viewModel::onUndo,
-                onClearAllTap = viewModel::onClearAll,
+                onClearAllTap = { confirmClearAll = true },
                 onSaveTap = {
                     scope.launch {
                         val ok = viewModel.saveSession()
@@ -267,6 +302,8 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 onTrim = { trimTarget = track.index },
                 onNudge = { delta -> viewModel.onNudgeTrack(track.index, delta) },
                 onToggleFade = { viewModel.onToggleTrackFade(track.index) },
+                onRename = { renameTarget = track.index },
+                compact = performanceMode,
             )
         }
         val backingPanel: @Composable () -> Unit = {
@@ -317,6 +354,9 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 onTap = viewModel::onSmartLoopButton,
                 modifier = Modifier.padding(top = 12.dp),
             )
+            // Loop structure (bars + length) and an on-screen beat pulse so you
+            // know exactly when to come in — emphasised during the count-in.
+            LoopBeatBar(transport = transport, loopMs = viewModel.loopLengthMs())
             if (twoPane) {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(2),
@@ -328,8 +368,10 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     items(tracks, key = { it.index }) { trackRow(it) }
-                    item(key = "backing", span = { GridItemSpan(maxLineSpan) }) { backingPanel() }
-                    item(key = "fx", span = { GridItemSpan(maxLineSpan) }) { fxPanel() }
+                    if (!performanceMode) {
+                        item(key = "backing", span = { GridItemSpan(maxLineSpan) }) { backingPanel() }
+                        item(key = "fx", span = { GridItemSpan(maxLineSpan) }) { fxPanel() }
+                    }
                 }
             } else {
                 LazyColumn(
@@ -340,8 +382,10 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     items(tracks, key = { it.index }) { trackRow(it) }
-                    item(key = "backing") { backingPanel() }
-                    item(key = "fx") { fxPanel() }
+                    if (!performanceMode) {
+                        item(key = "backing") { backingPanel() }
+                        item(key = "fx") { fxPanel() }
+                    }
                 }
             }
         }
