@@ -275,6 +275,11 @@ class AudioEngine {
     mCountInBars.store(bars < 1 ? 1 : (bars > 8 ? 8 : bars), std::memory_order_relaxed);
   }
   int32_t countInBars() const { return mCountInBars.load(std::memory_order_relaxed); }
+  // Countdown for the UI: beats remaining until recording begins during a
+  // count-in, or 0 when no count-in is in progress. Lock-free UI read.
+  int32_t countInBeatsRemaining() const {
+    return mCountInDisplay.load(std::memory_order_relaxed);
+  }
   // With the metronome active: the master loop length is rounded to whole
   // bars — stopping early keeps recording to the bar line, stopping late
   // trims back to the nearest bar. No effect when the click is off.
@@ -672,11 +677,16 @@ class AudioEngine {
   std::atomic<bool> mQuantizeBars{true};
   std::atomic<int32_t> mCountInBars{1};  // count-in length in bars
   // Count-in counting state (audio thread only): whether the first count
-  // downbeat has been seen, how many count bars remain, and the last beat
-  // count observed (for downbeat edge detection).
+  // downbeat has been seen, how many count beats have elapsed, the total
+  // beats to count, and the last beat count observed (for downbeat edge
+  // detection).
   bool mCountInStarted = false;
-  int32_t mCountInRemaining = 0;
+  int32_t mCountInBeatsCounted = 0;
+  int32_t mCountInBeatsTotal = 0;
   uint32_t mCountInLastBeat = 0;
+  // Published to the UI: the countdown number to display during count-in
+  // (beats remaining until recording begins), or 0 when not counting in.
+  std::atomic<int32_t> mCountInDisplay{0};
   int32_t mMasterStopAt = 0;       // audio thread only; 0 = no scheduled stop
 
   // Current routing (mirrors mConfig.*DeviceId for lock-free UI reads;

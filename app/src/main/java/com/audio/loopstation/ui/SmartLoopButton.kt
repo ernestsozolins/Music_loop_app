@@ -47,11 +47,21 @@ fun SmartLoopButton(
         enabled = transport.engineReady,
     ) {
         Box(contentAlignment = Alignment.Center) {
-            Text(
-                text = transport.loopButtonLabel,
-                style = MaterialTheme.typography.headlineSmall,
-                textAlign = TextAlign.Center,
-            )
+            if (transport.isCountingIn && transport.countInBeatsRemaining > 0) {
+                // A big count-down number so the performer knows exactly when
+                // to come in — recording begins as it hits 0 on the downbeat.
+                Text(
+                    text = transport.countInBeatsRemaining.toString(),
+                    style = MaterialTheme.typography.displayMedium,
+                    textAlign = TextAlign.Center,
+                )
+            } else {
+                Text(
+                    text = transport.loopButtonLabel,
+                    style = MaterialTheme.typography.headlineSmall,
+                    textAlign = TextAlign.Center,
+                )
+            }
         }
     }
 }

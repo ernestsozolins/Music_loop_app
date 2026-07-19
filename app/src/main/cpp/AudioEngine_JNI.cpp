@@ -414,6 +414,14 @@ JNIEXPORT jlong JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetBeatInfo
   return (count << 8) | active | inBar;
 }
 
+// Beats remaining until a pending count-in begins recording (0 = none).
+JNIEXPORT jint JNICALL Java_com_audio_loopstation_AudioEngine_nativeGetCountInBeats(JNIEnv*, jobject,
+                                                                                   jlong handle) {
+  AudioEngine* engine = fromHandle(handle);
+  if (engine == nullptr) return 0;
+  return static_cast<jint>(engine->countInBeatsRemaining());
+}
+
 // ---------------------------------------------------------------------------
 // Disk spooling — paths arrive from Kotlin (e.g. under
 // Context.getFilesDir().absolutePath); all file I/O runs on the spooler's

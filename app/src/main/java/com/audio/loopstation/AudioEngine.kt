@@ -123,6 +123,8 @@ class AudioEngine private constructor(private var handle: Long) {
         val metronomeActive: Boolean,
         val beatInBar: Int,
         val beatCount: Long,
+        /** Beats left until a pending count-in starts recording; 0 = none. */
+        val countInBeatsRemaining: Int = 0,
     )
 
     // ------------------------------------------------------------------
@@ -727,6 +729,7 @@ class AudioEngine private constructor(private var handle: Long) {
             metronomeActive = (beat and 0x80L) != 0L,
             beatInBar = (beat and 0x7FL).toInt(),
             beatCount = beat ushr 8,
+            countInBeatsRemaining = nativeGetCountInBeats(h),
         )
     }
 
@@ -862,6 +865,7 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeSetLoopQuantize(handle: Long, enabled: Boolean)
     private external fun nativeSetInputChannels(handle: Long, channels: Int, mapLeft: Int, mapRight: Int)
     private external fun nativeGetBeatInfo(handle: Long): Long
+    private external fun nativeGetCountInBeats(handle: Long): Int
 
     private external fun nativeSetReverbRoomSize(handle: Long, size: Float)
     private external fun nativeSetReverbMix(handle: Long, mix: Float)

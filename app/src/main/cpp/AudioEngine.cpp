@@ -1419,6 +1419,7 @@ void AudioEngine::recordToggleTrack(int32_t track) {
   const EngineState st = mState.load(std::memory_order_relaxed);
   if (st == EngineState::CountIn && mCountInTrack == track) {
     mState.store(EngineState::Idle, std::memory_order_relaxed);  // cancel count-in
+    mCountInDisplay.store(0, std::memory_order_relaxed);
     mTracks[track].transport.store(static_cast<uint8_t>(TrackTransport::Empty),
                                    std::memory_order_relaxed);
     return;
@@ -1439,6 +1440,7 @@ void AudioEngine::recordStopTrack(int32_t track) {
   const EngineState st = mState.load(std::memory_order_relaxed);
   if (st == EngineState::CountIn && mCountInTrack == track) {
     mState.store(EngineState::Idle, std::memory_order_relaxed);
+    mCountInDisplay.store(0, std::memory_order_relaxed);
     mTracks[track].transport.store(static_cast<uint8_t>(TrackTransport::Empty),
                                    std::memory_order_relaxed);
     return;
@@ -1558,16 +1560,22 @@ void AudioEngine::armRecordTrack(int32_t track, bool allowCountIn) {
       // Count in before capturing, so the loop starts on a downbeat. Auto-start
       // the click if it is off, so the count-in always has a beat (and the take
       // is bar-quantizable). Recording begins after `mCountInBars` full bars.
+      float bpm = 120.0f;
+      int32_t beats = 4;
+      mMetronome.tempo(bpm, beats);  // read the UI's current tempo/time sig
       if (!mMetronome.isActive()) {
-        float bpm = 120.0f;
-        int32_t beats = 4;
-        mMetronome.tempo(bpm, beats);
         mMetronome.setState(true, bpm, beats);  // fires an immediate downbeat
       }
       mCountInTrack = track;
       mCountInStarted = false;
-      mCountInRemaining = mCountInBars.load(std::memory_order_relaxed);
+      mCountInBeatsCounted = 0;
+      // Count `countInBars` whole bars of beats before recording begins.
+      mCountInBeatsTotal = mCountInBars.load(std::memory_order_relaxed) * beats;
+      // Capture the beat counter BEFORE the just-armed click fires its first
+      // downbeat, so the first counted beat is that downbeat (not the beat
+      // after it). This keeps the count-in exactly `countInBars` bars long.
       mCountInLastBeat = mMetronome.beatCount();
+      mCountInDisplay.store(mCountInBeatsTotal, std::memory_order_relaxed);
       mState.store(EngineState::CountIn, std::memory_order_relaxed);
     } else {
       t.transport.store(static_cast<uint8_t>(TrackTransport::Recording),
@@ -1694,27 +1702,37 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
 
   const EngineState st = mState.load(std::memory_order_relaxed);
 
-  // ---- Count-in: count `mCountInBars` full bars of clicks, then begin the
-  // master take exactly on the following downbeat. The metronome renders after
-  // this function, so its beat state here is from the previous callback and
-  // recording begins within one callback of the downbeat.
+  // ---- Count-in: count `mCountInBeatsTotal` beats of clicks (one downbeat +
+  // the rest of the count bars), then begin the master take exactly on the
+  // following downbeat. A countdown number (beats remaining) is published for
+  // the UI so the performer can see when to come in.
   if (st == EngineState::CountIn) {
     bool startNow = false;
     const uint32_t bc = mMetronome.beatCount();
     if (bc != mCountInLastBeat) {  // a new beat fired
       mCountInLastBeat = bc;
-      if (mMetronome.beatInBar() == 0) {  // ...and it was a downbeat
-        if (!mCountInStarted) {
-          mCountInStarted = true;  // first count bar begins
-        } else if (--mCountInRemaining <= 0) {
-          startNow = true;  // counted the requested bars — record on this bar
+      const bool downbeat = (mMetronome.beatInBar() == 0);
+      if (!mCountInStarted) {
+        // Wait for the first downbeat so the count (and the loop) is
+        // bar-aligned; keep showing the full count until then.
+        if (downbeat) {
+          mCountInStarted = true;
+          mCountInBeatsCounted = 1;
+          mCountInDisplay.store(mCountInBeatsTotal, std::memory_order_relaxed);
         }
+      } else if (mCountInBeatsCounted >= mCountInBeatsTotal && downbeat) {
+        startNow = true;  // counted every beat — this downbeat is the loop top
+      } else {
+        ++mCountInBeatsCounted;
+        mCountInDisplay.store(mCountInBeatsTotal - mCountInBeatsCounted + 1,
+                              std::memory_order_relaxed);
       }
     }
     // If the click was switched off mid-count-in the beat counter freezes,
     // so start rather than soft-locking.
     if (!mMetronome.isActive()) startNow = true;
     if (startNow) {
+      mCountInDisplay.store(0, std::memory_order_relaxed);
       mOverdubTrack = mCountInTrack;
       mMasterTrack = mCountInTrack;
       mMasterRecordPos = 0;

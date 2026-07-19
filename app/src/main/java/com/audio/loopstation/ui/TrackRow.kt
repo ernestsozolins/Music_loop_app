@@ -2,6 +2,7 @@ package com.audio.loopstation.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -104,15 +105,36 @@ fun TrackRow(
                     Spacer(Modifier.width(12.dp))
                 }
                 Column(Modifier.weight(1f)) {
-                    Text(
-                        track.name,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = if (track.isSelected) {
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
-                    )
+                    // Tap the name (pencil affordance) to rename — available on
+                    // every track, empty ones included, so it's always findable.
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable { onRename() }
+                            .semantics { contentDescription = "Rename ${track.name}" }
+                            .padding(vertical = 4.dp, horizontal = 2.dp),
+                    ) {
+                        Text(
+                            track.name,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = if (track.isSelected) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "✎",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = if (track.isSelected) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
                     Text(
                         text = buildString {
                             if (track.isSelected) append("● SELECTED · ")
@@ -241,7 +263,6 @@ fun TrackRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.padding(top = 4.dp),
                 ) {
-                    TextButton(onClick = onRename) { Text("Rename") }
                     TextButton(onClick = onTrim) { Text("Trim") }
                     TextButton(onClick = onToggleFade) {
                         Text(if (track.fadeMs > 0) "Fade ✓" else "Fade")

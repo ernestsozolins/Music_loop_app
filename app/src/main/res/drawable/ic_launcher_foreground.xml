@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive-icon foreground: a "loop" ring wrapping a 3-bar audio waveform.
+     All strokes sit inside the 72dp safe zone so no launcher mask clips them.
+     The centre bar is amber to give the mark a warm musical accent. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Loop ring -->
+    <path
+        android:strokeColor="#F8FAFC"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:pathData="M54,23 a31,31 0 1,0 0,62 a31,31 0 1,0 0,-62" />
+    <!-- Waveform: short / tall / short, centred in the ring -->
+    <path
+        android:strokeColor="#F8FAFC"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:pathData="M44,45 L44,63" />
+    <path
+        android:strokeColor="#FBBF24"
+        android:strokeWidth="6.5"
+        android:strokeLineCap="round"
+        android:pathData="M54,35 L54,73" />
+    <path
+        android:strokeColor="#F8FAFC"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:pathData="M64,45 L64,63" />
+</vector>

@@ -98,6 +98,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val isRecording: Boolean = false,
         val isPlaying: Boolean = false,
         val isCountingIn: Boolean = false,
+        val countInBeatsRemaining: Int = 0,  // beats until recording starts
         val hasLoop: Boolean = false,
         val loopLengthFrames: Int = 0,
         val loopBars: Int = 0,  // loop length in whole bars at the current tempo
@@ -572,6 +573,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isPlaying = state == AudioEngine.State.PLAYING ||
                     state == AudioEngine.State.OVERDUBBING,
                 isCountingIn = state == AudioEngine.State.COUNT_IN,
+                countInBeatsRemaining = m.countInBeatsRemaining,
                 hasLoop = loopLen > 0,
                 loopLengthFrames = loopLen,
                 loopBars = bars,
@@ -715,13 +717,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * The first take counts in, which needs the click. If count-in is on but
-     * the metronome is off and no loop exists yet, turn the click on (and keep
-     * the UI in sync) so the count-in fires and the loop is bar-quantizable.
+     * the metronome is off and no loop exists yet, reflect the click as on in
+     * the UI. The engine itself starts the click inside armRecordTrack, at the
+     * exact instant it captures the beat counter — starting it here first would
+     * let the immediate downbeat fire before the count begins, stretching the
+     * count-in to ~2 bars and confusing the performer (see armRecordTrack).
      */
     private fun ensureCountInClick(engine: AudioEngine) {
         val t = _transport.value
         if (t.countIn && !t.metronomeOn && !t.hasLoop) {
-            engine.setMetronomeState(true, t.bpm.toFloat(), t.beatsPerMeasure)
             _transport.update { it.copy(metronomeOn = true) }
         }
     }

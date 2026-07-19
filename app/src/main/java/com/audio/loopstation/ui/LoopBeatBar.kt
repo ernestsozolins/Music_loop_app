@@ -39,7 +39,10 @@ fun LoopBeatBar(
     ) {
         Text(
             text = when {
-                counting -> "Get ready…"
+                counting -> {
+                    val n = transport.countInBeatsRemaining
+                    if (n > 0) "Get ready… $n" else "Here we go!"
+                }
                 transport.hasLoop -> "${transport.loopBars} bar${if (transport.loopBars == 1) "" else "s"} · " +
                     "%.1fs".format(loopMs / 1000f)
                 else -> ""
