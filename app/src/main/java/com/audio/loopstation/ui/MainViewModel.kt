@@ -708,25 +708,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun startRecordingWithSnapshot(engine: AudioEngine) {
         armedTrack = selectedTrackIndex()
         val track = armedTrack
-        ensureCountInClick(engine)
+        // No need to pre-start the click for count-in: armRecordTrack turns it
+        // on itself (at the exact instant it captures the beat counter, so the
+        // count-in is the right length), and onMeters drives the metronome
+        // toggle from the real engine state.
         viewModelScope.launch(Dispatchers.Default) {
             engine.snapshotTrackForUndo(track)  // pre-pass audio for Backspace
             engine.startRecording()
-        }
-    }
-
-    /**
-     * The first take counts in, which needs the click. If count-in is on but
-     * the metronome is off and no loop exists yet, reflect the click as on in
-     * the UI. The engine itself starts the click inside armRecordTrack, at the
-     * exact instant it captures the beat counter — starting it here first would
-     * let the immediate downbeat fire before the count begins, stretching the
-     * count-in to ~2 bars and confusing the performer (see armRecordTrack).
-     */
-    private fun ensureCountInClick(engine: AudioEngine) {
-        val t = _transport.value
-        if (t.countIn && !t.metronomeOn && !t.hasLoop) {
-            _transport.update { it.copy(metronomeOn = true) }
         }
     }
 
@@ -886,7 +874,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             engine.recordTrack(index)  // closing a pass — no snapshot needed
         } else {
             armedTrack = index
-            ensureCountInClick(engine)  // first take counts in
+            // armRecordTrack owns count-in click activation (see startRecordingWithSnapshot).
             // Snapshot the pre-pass audio for Backspace/undo (multi-MB, off-main).
             viewModelScope.launch(Dispatchers.Default) {
                 engine.snapshotTrackForUndo(index)
