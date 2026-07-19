@@ -9,6 +9,12 @@ android {
     namespace = "com.audio.loopstation"
     compileSdk = 35
 
+    // NDK r27+ builds native code (and ships libc++_shared.so) with 16 KB ELF
+    // alignment by default, which Android 15+ 16 KB-page devices require and the
+    // Play Store now mandates. If this exact NDK isn't installed, Android Studio
+    // fetches it, or adjust to another r27+/r28 build you have.
+    ndkVersion = "27.2.12479018"
+
     defaultConfig {
         applicationId = "com.audio.loopstation"
         // 27: stable AAudio (the Oboe low-latency backend) + AudioFocusRequest.
@@ -89,5 +95,6 @@ dependencies {
     ksp("androidx.room:room-compiler:2.6.1")
 
     // Native audio: Oboe via Prefab (consumed by CMake as oboe::oboe).
-    implementation("com.google.oboe:oboe:1.9.0")
+    // 1.9.3 ships a 16 KB page-aligned liboboe.so (1.9.0 was not aligned).
+    implementation("com.google.oboe:oboe:1.9.3")
 }
