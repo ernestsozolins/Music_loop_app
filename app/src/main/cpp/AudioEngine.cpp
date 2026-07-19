@@ -1268,15 +1268,18 @@ void AudioEngine::applyCommand(const Command& cmd) {
     }
     case CommandType::Stop:      // legacy alias
     case CommandType::StopAll: {
-      if (st == EngineState::RecordingMaster || st == EngineState::CountIn) {
+      if (st == EngineState::CountIn) {
+        // Count-in hasn't captured any audio yet — cancel it cleanly.
+        mCountInDisplay.store(0, std::memory_order_relaxed);
         mMasterRecordPos = 0;
         mMasterStopAt = 0;
         mTracks[mCountInTrack].transport.store(
             static_cast<uint8_t>(TrackTransport::Empty), std::memory_order_relaxed);
-        mTracks[mOverdubTrack].transport.store(
-            static_cast<uint8_t>(TrackTransport::Empty), std::memory_order_relaxed);
         mState.store(EngineState::Idle, std::memory_order_relaxed);
       }
+      // Stop KEEPS what was played: stopTrackInternal closes any in-progress
+      // take (the master-defining take or a fixed-length one) instead of
+      // discarding it — pressing Stop to finish a recording must not lose it.
       for (int32_t t = 0; t < mConfig.trackCount; ++t) stopTrackInternal(t);
       setPlayhead(0);  // rewind so the next All Start begins at the top
       break;
@@ -1497,13 +1500,12 @@ void AudioEngine::stopTrackInternal(int32_t track) {
   LoopTrack& tr = mTracks[track];
   const uint8_t tp = tr.transport.load(std::memory_order_relaxed);
   if (tp == static_cast<uint8_t>(TrackTransport::Recording)) {
-    if (mLoopLen == 0) {  // cancel the master take in progress
-      mMasterRecordPos = 0;
-      mMasterStopAt = 0;
-      setPlayhead(0);
-    } else {
-      tr.recPos = 0;  // discard the partial fixed-length take
-    }
+    // Stop CLOSES the take and keeps it (Stop is a finish, never an abort).
+    // The first take defines the shared loop length; a later fixed-length
+    // take becomes one loop of content. finalize* marks the track Playing,
+    // which the store below drops to Stopped (kept, but not sounding).
+    if (mLoopLen == 0) finalizeMasterOrQuantize();
+    else finalizeTrackRecord(track);
   }
   tr.transport.store(tr.hasContent.load(std::memory_order_relaxed)
                          ? static_cast<uint8_t>(TrackTransport::Stopped)
