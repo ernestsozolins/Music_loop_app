@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Notification small icon. Android renders these as a MASK: only the alpha
+  channel is used and the system tints it. It must therefore be a white
+  silhouette on transparent — the previous android.R.drawable.ic_btn_speak_now
+  is a button asset and shows up as a filled blob in the status bar.
+  24dp canvas, drawn inside the 22dp safe area.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <!-- Loop ring -->
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M12,4 a8,8 0 1,0 0,16 a8,8 0 1,0 0,-16" />
+    <!-- Waveform bars -->
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M9,10 L9,14" />
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M12,7.5 L12,16.5" />
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M15,10 L15,14" />
+</vector>

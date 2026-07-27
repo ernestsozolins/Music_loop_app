@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ (API 31+) replacement for backup_rules.xml. Same reasoning:
+  keep the multi-hundred-MB audio out of cloud backup and device transfer,
+  keep the small settings + session database.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="takes" />
+        <exclude domain="file" path="stems" />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <!-- A local device-to-device transfer has no 25 MB quota, but the
+             takes are large and re-recordable; skip them to keep it quick. -->
+        <exclude domain="file" path="takes" />
+        <exclude domain="file" path="stems" />
+    </device-transfer>
+</data-extraction-rules>

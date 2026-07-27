@@ -9,11 +9,12 @@ android {
     namespace = "com.audio.loopstation"
     compileSdk = 35
 
-    // NDK r27+ builds native code (and ships libc++_shared.so) with 16 KB ELF
-    // alignment by default, which Android 15+ 16 KB-page devices require and the
-    // Play Store now mandates. If this exact NDK isn't installed, Android Studio
-    // fetches it, or adjust to another r27+/r28 build you have.
-    ndkVersion = "27.2.12479018"
+    // NDK r27 builds native code (and ships libc++_shared.so) 16 KB-aligned by
+    // default. This is AGP 8.7.3's OWN default NDK revision, so it is already
+    // present in any environment that has built this project — pinning a newer
+    // revision would force a fresh SDK download (and fail offline/CI) for no
+    // alignment benefit. Any r27+/r28 revision works if you prefer to bump it.
+    ndkVersion = "27.0.12077973"
 
     defaultConfig {
         applicationId = "com.audio.loopstation"
@@ -95,6 +96,9 @@ dependencies {
     ksp("androidx.room:room-compiler:2.6.1")
 
     // Native audio: Oboe via Prefab (consumed by CMake as oboe::oboe).
-    // 1.9.3 ships a 16 KB page-aligned liboboe.so (1.9.0 was not aligned).
+    // 1.9.1+ ships a 16 KB page-aligned liboboe.so (1.9.0 was not aligned).
+    // NOTE: this bump only clears the Play Store's 16 KB advisory — it is not
+    // needed to run on 4 KB-page devices such as the Galaxy Tab S9 Ultra. If
+    // this version cannot be resolved, "1.9.0" is a safe fallback.
     implementation("com.google.oboe:oboe:1.9.3")
 }

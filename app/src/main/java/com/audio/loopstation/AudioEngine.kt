@@ -807,26 +807,52 @@ class AudioEngine private constructor(private var handle: Long) {
             val isTablet = context.resources.configuration.smallestScreenWidthDp >= 600
             val activityManager =
                 context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            val largeHeap = activityManager.memoryClass >= 384 // MB per-app budget
+
+            // Size the loop buffers off PHYSICAL RAM, not memoryClass.
+            // memoryClass is the per-app *Java heap* budget and Samsung
+            // flagships (Tab S9 Ultra included) report 256 MB even with 12-16 GB
+            // installed — the old `memoryClass >= 384` test therefore failed on
+            // exactly the hardware it was meant to detect and silently dropped
+            // the device to the 6-track/60 s tier. The loop buffers are native
+            // allocations, so the Java heap budget never governed them anyway.
+            val memInfo = ActivityManager.MemoryInfo()
+            activityManager.getMemoryInfo(memInfo)
+            val totalRamGb = memInfo.totalMem / (1024.0 * 1024.0 * 1024.0)
+            val lowRam = activityManager.isLowRamDevice
 
             val (tracks, loopSeconds) = when {
-                isTablet && largeHeap -> 8 to 120 // Galaxy Tab S9 Ultra class
-                isTablet -> 6 to 60
+                // Tab S9 Ultra class: 12-16 GB. 8 x 120 s stereo float = ~368 MB
+                // native, comfortably inside the budget on this hardware.
+                isTablet && !lowRam && totalRamGb >= 7.0 -> 8 to 120
+                isTablet && !lowRam && totalRamGb >= 3.5 -> 6 to 60
+                !lowRam && totalRamGb >= 5.5 -> 5 to 60   // large-RAM phones
                 else -> 4 to 30
             }
 
-            val handle = nativeCreate(
-                sampleRate = 48_000,
-                channelCount = 2,
-                trackCount = tracks,
-                maxLoopSeconds = loopSeconds,
-                lookAheadMillis = 15,
-                driftSlackMillis = 5,
-                inputDeviceId = inputDeviceId,
-                outputDeviceId = outputDeviceId,
+            // Fall back to progressively smaller configurations rather than
+            // killing the service: nativeCreate returns 0 when the (large)
+            // loop buffers cannot be allocated, which can happen under memory
+            // pressure even on a big tablet. A 4-track/30 s engine (~46 MB) is
+            // far better than no looper at all.
+            val tiers = listOf(
+                tracks to loopSeconds,
+                tracks to (loopSeconds / 2).coerceAtLeast(30),
+                4 to 30,
             )
-            check(handle != 0L) { "native engine creation failed" }
-            return AudioEngine(handle)
+            for ((t, seconds) in tiers) {
+                val handle = nativeCreate(
+                    sampleRate = 48_000,
+                    channelCount = 2,
+                    trackCount = t,
+                    maxLoopSeconds = seconds,
+                    lookAheadMillis = 15,
+                    driftSlackMillis = 5,
+                    inputDeviceId = inputDeviceId,
+                    outputDeviceId = outputDeviceId,
+                )
+                if (handle != 0L) return AudioEngine(handle)
+            }
+            error("native engine creation failed even at the minimum configuration")
         }
 
         // ---------------- native declarations ----------------

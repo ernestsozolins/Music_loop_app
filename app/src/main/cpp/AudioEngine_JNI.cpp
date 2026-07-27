@@ -16,10 +16,13 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <exception>
 #include <memory>
+#include <new>
 #include <string>
 
 #include "AudioEngine.h"
+#include "Log.h"
 
 namespace {
 
@@ -102,7 +105,20 @@ JNIEXPORT jlong JNICALL Java_com_audio_loopstation_AudioEngine_nativeCreate(
   config.driftSlackMillis = driftSlackMillis;
   config.inputDeviceId = inputDeviceId;
   config.outputDeviceId = outputDeviceId;
-  return reinterpret_cast<jlong>(new AudioEngine(config));
+  // The constructor allocates and PRE-TOUCHES the loop buffers — up to ~368 MB
+  // on an 8-track/120 s tablet configuration. A std::bad_alloc (or any other
+  // exception) escaping across the JNI boundary is undefined behaviour and
+  // aborts the process with no usable diagnostic, so it is converted into the
+  // null handle that AudioEngine.create() already checks for.
+  try {
+    return reinterpret_cast<jlong>(new AudioEngine(config));
+  } catch (const std::exception& e) {
+    LOGE("engine creation failed (%d tracks x %d s): %s", trackCount, maxLoopSeconds, e.what());
+    return 0;
+  } catch (...) {
+    LOGE("engine creation failed (%d tracks x %d s): unknown error", trackCount, maxLoopSeconds);
+    return 0;
+  }
 }
 
 JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeDestroy(JNIEnv*, jobject,

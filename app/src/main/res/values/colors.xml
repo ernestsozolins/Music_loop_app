@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches Compose's darkColorScheme() surface so the pre-first-frame
+         window and the composed UI are the same colour (no flash). -->
+    <color name="loop_background">#FF121212</color>
+</resources>

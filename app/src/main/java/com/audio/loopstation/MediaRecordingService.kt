@@ -104,6 +104,15 @@ class MediaRecordingService : Service() {
         abandonFocus()
         serviceScope.cancel()
         engine.release()
+        // Don't leave an orphaned "Recording…" notification behind if the
+        // service is destroyed while still foregrounded (e.g. system kill).
+        if (isForeground) {
+            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+            isForeground = false
+        }
+        runCatching {
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIFICATION_ID)
+        }
         super.onDestroy()
     }
 
@@ -245,19 +254,34 @@ class MediaRecordingService : Service() {
     // ------------------------------------------------------------------
 
     private fun promoteToForeground(text: String) {
-        // Being merely bound is not enough to survive the UI unbinding —
-        // become a *started* service first, then go foreground.
-        startService(Intent(this, MediaRecordingService::class.java))
+        // ANDROID 12+ / 14+ HARD RULES. This runs off a meter tick, which keeps
+        // firing while the app is backgrounded, so it can be reached with no
+        // foreground app. In that state:
+        //   - startService() throws IllegalStateException (S+),
+        //   - startForeground(..., TYPE_MICROPHONE) throws
+        //     ForegroundServiceStartNotAllowedException (S+) or, on U+,
+        //     SecurityException/MissingForegroundServiceTypeException because
+        //     mic is a while-in-use type.
+        // Any of those would crash the audio service and lose the session, so
+        // every step is guarded and failure simply leaves us un-promoted (the
+        // next tick retries once the UI is back in front).
+        val started = runCatching {
+            startService(Intent(this, MediaRecordingService::class.java))
+        }.isSuccess
+        if (!started) return  // background: cannot become a started service yet
+
         val notification = buildNotification(text)
-        // FOREGROUND_SERVICE_TYPE_MICROPHONE exists since API 30 (R); below
-        // that the 2-arg overload picks the types up from the manifest.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            startForeground(NOTIFICATION_ID, notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
-        isForeground = true
+        val promoted = runCatching {
+            // FOREGROUND_SERVICE_TYPE_MICROPHONE exists since API 30 (R); below
+            // that the 2-arg overload picks the types up from the manifest.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                startForeground(NOTIFICATION_ID, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        }.isSuccess
+        isForeground = promoted
     }
 
     private fun demoteFromForeground() {
@@ -285,7 +309,7 @@ class MediaRecordingService : Service() {
             PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setSmallIcon(R.drawable.ic_stat_loop)
             .setContentTitle("Loop Station")
             .setContentText(text)
             .setContentIntent(openApp)
@@ -298,8 +322,12 @@ class MediaRecordingService : Service() {
     }
 
     private fun updateNotification(text: String) {
-        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
-            .notify(NOTIFICATION_ID, buildNotification(text))
+        // POST_NOTIFICATIONS can be denied on API 33+ (the user can refuse the
+        // prompt); notify() must never take the audio service down with it.
+        runCatching {
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                .notify(NOTIFICATION_ID, buildNotification(text))
+        }
     }
 
     private fun createNotificationChannel() {

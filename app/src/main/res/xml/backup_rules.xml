@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Auto Backup (API 23-30). filesDir is included by default, and it holds the
+  recorded takes and exported stems — hundreds of MB of float32 wav. Auto
+  Backup has a 25 MB per-app quota, so leaving them in silently disables
+  backup for the whole app. Back up only the small settings/session metadata.
+-->
+<full-backup-content>
+    <exclude domain="file" path="takes" />
+    <exclude domain="file" path="stems" />
+    <exclude domain="external" path="." />
+    <exclude domain="root" path="." />
+</full-backup-content>

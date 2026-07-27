@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The app renders a dark Material 3 theme in Compose. The platform theme
+      only governs the window BEFORE the first frame, so it must already be
+      dark: the previous @android:style/Theme.Material.NoActionBar painted a
+      light window background and flashed white on every cold start.
+
+      targetSdk 35 forces edge-to-edge on Android 15+, so the bars are
+      transparent and the Compose layer insets itself (safeDrawingPadding).
+      enforceNavigationBarContrast is disabled so the system does not paint a
+      scrim over the bottom transport strip.
+    -->
+    <style name="Theme.LoopStation" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/loop_background</item>
+        <item name="android:colorBackground">@color/loop_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>

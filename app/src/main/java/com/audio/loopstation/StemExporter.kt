@@ -40,6 +40,11 @@ class StemExporter(private val context: Context) {
         engine: AudioEngine,
         sessionName: String = defaultSessionName(),
     ): File? = withContext(Dispatchers.IO) {
+        // 0. Sweep any stem directories a previous run left behind (a crash or
+        //    a kill between steps 2 and 5). Without this they accumulate
+        //    forever: one 8-track / 120 s export is ~368 MB of float32 wav.
+        purgeStemDirs()
+
         // 1. Finalize spooled audio so every .wav on disk has valid headers.
         if (!engine.flushAndCloseSession()) return@withContext null
 
@@ -47,19 +52,35 @@ class StemExporter(private val context: Context) {
         //    (recording in progress) or a disk write failed. Zero stems is
         //    fine — the session may be capture-takes only.
         val stemsDir = File(context.filesDir, "$STEMS_DIR/$sessionName").apply { mkdirs() }
-        engine.exportStems(stemsDir.absolutePath) ?: return@withContext null
-
-        // 3. Gather the session's .wav files, namespaced inside the zip.
-        val entries = buildList {
-            wavsIn(stemsDir).forEach { add("stems/${it.name}" to it) }
-            wavsIn(File(context.filesDir, TAKES_DIR)).forEach { add("takes/${it.name}" to it) }
+        if (engine.exportStems(stemsDir.absolutePath) == null) {
+            stemsDir.deleteRecursively()
+            return@withContext null
         }
-        if (entries.isEmpty()) return@withContext null
 
-        // 4. Zip into the FileProvider-visible cache area.
-        val zip = File(File(context.cacheDir, EXPORT_DIR).apply { mkdirs() }, ZIP_NAME)
-        zipTo(zip, entries)
-        zip
+        try {
+            // 3. Gather the session's .wav files, namespaced inside the zip.
+            val entries = buildList {
+                wavsIn(stemsDir).forEach { add("stems/${it.name}" to it) }
+                wavsIn(File(context.filesDir, TAKES_DIR)).forEach { add("takes/${it.name}" to it) }
+            }
+            if (entries.isEmpty()) return@withContext null
+
+            // 4. Zip into the FileProvider-visible cache area.
+            val zip = File(File(context.cacheDir, EXPORT_DIR).apply { mkdirs() }, ZIP_NAME)
+            zipTo(zip, entries)
+            zip
+        } finally {
+            // 5. The zip now holds the stems, so the loose copies are pure
+            //    duplication — drop them instead of doubling the footprint.
+            stemsDir.deleteRecursively()
+        }
+    }
+
+    /** Remove every leftover per-session stem directory. */
+    private fun purgeStemDirs() {
+        File(context.filesDir, STEMS_DIR).listFiles()
+            ?.filter { it.isDirectory }
+            ?.forEach { runCatching { it.deleteRecursively() } }
     }
 
     private fun wavsIn(dir: File): List<File> =
