@@ -993,7 +993,17 @@ oboe::DataCallbackResult AudioEngine::onInputReady(const float* audioData, int32
   // loop and the speakers.
   const float* frames = audioData;
   const int32_t srcCh = mInputOpenedChannels;
-  if (srcCh != mConfig.channelCount && numFrames <= kMaxCallbackFrames && srcCh > 0) {
+  const bool needsRemap = srcCh > 0 && srcCh != mConfig.channelCount;
+  if (numFrames > kMaxCallbackFrames) {
+    // Defensive, mirroring the output callback. Critically, a remap could not
+    // run here (mInputRemapScratch is only kMaxCallbackFrames deep), and
+    // handing the ring an un-remapped buffer would make it read
+    // numFrames * channelCount floats out of one holding numFrames * srcCh —
+    // an out-of-bounds read whenever srcCh < channelCount. Drop the block.
+    mOversizeCallbackCount.fetch_add(1, std::memory_order_relaxed);
+    if (needsRemap) return oboe::DataCallbackResult::Continue;
+  }
+  if (needsRemap && numFrames <= kMaxCallbackFrames) {
     // Pull the engine's L/R from the chosen source channels (indices clamped
     // to what the device actually opened).
     const int32_t dstCh = mConfig.channelCount;
