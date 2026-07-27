@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -73,8 +74,10 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     var trimTarget by remember { mutableStateOf<Int?>(null) }
     var renameTarget by remember { mutableStateOf<Int?>(null) }
     var confirmClearAll by remember { mutableStateOf(false) }
-    var performanceMode by remember { mutableStateOf(false) }
-    var footMode by remember { mutableStateOf(false) }
+    // Layout modes survive rotation / process recreation — being dumped out of
+    // foot mode mid-take because the tablet turned would be its own bug.
+    var performanceMode by rememberSaveable { mutableStateOf(false) }
+    var footMode by rememberSaveable { mutableStateOf(false) }
 
     trimTarget?.let { index ->
         val track = tracks.firstOrNull { it.index == index }
@@ -87,7 +90,15 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 bins = trackWaveforms[index],
                 onChange = { s, e -> viewModel.onSetTrackTrim(index, s, e) },
                 onAutoTrim = { viewModel.autoTrimAndGet(index) },
-                onApplyToLoop = { viewModel.onApplyTrimToLoop(index) },
+                onApplyToLoop = {
+                    viewModel.onApplyTrimToLoop(index) {
+                        // The crop parks every track stopped, so say so rather
+                        // than leaving the performer wondering where it went.
+                        scope.launch {
+                            snackbar.showSnackbar("Loop shortened — press Play to hear it")
+                        }
+                    }
+                },
                 onDismiss = { trimTarget = null },
             )
         } else {
@@ -278,7 +289,14 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 },
                 performanceMode = performanceMode,
                 onPerformanceToggle = { performanceMode = !performanceMode },
-                onFootModeToggle = { footMode = true },
+                onFootModeToggle = {
+                    // Dismiss any open dialog first: foot mode replaces the
+                    // layout, and a leftover dialog would float over it.
+                    trimTarget = null
+                    renameTarget = null
+                    confirmClearAll = false
+                    footMode = true
+                },
                 onTimeSignatureTap = viewModel::onTimeSignatureChange,
                 onUndoTap = viewModel::onUndo,
                 onClearAllTap = { confirmClearAll = true },
