@@ -543,6 +543,16 @@ class AudioEngine private constructor(private var handle: Long) {
         if (handle == 0L) false else nativeApplyTrimToLoop(handle, track)
     }
 
+    /**
+     * Play the existing loop faster/slower, tape-style (1.0 = as recorded).
+     * Pitch rides with speed — there is no time-stretching. Clamped to
+     * 0.25..2.0 by the engine; a pass being recorded always captures at 1.0.
+     */
+    fun setLoopSpeed(ratio: Float) {
+        val h = handle
+        if (h != 0L) nativeSetLoopSpeed(h, ratio)
+    }
+
     // ------------------------------------------------------------------
     // Play modes: per-track loop vs 1-shot, and global Single/Multi.
     // ------------------------------------------------------------------
@@ -915,6 +925,7 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeGetTrackTrimEnd(handle: Long, track: Int): Int
     private external fun nativeAutoTrimTrack(handle: Long, track: Int)
     private external fun nativeApplyTrimToLoop(handle: Long, track: Int): Boolean
+    private external fun nativeSetLoopSpeed(handle: Long, ratio: Float)
     private external fun nativeSetTrackOneShot(handle: Long, track: Int, oneShot: Boolean)
     private external fun nativeSetPlayMode(handle: Long, mode: Int)
     private external fun nativeSetTrackFade(handle: Long, track: Int, frames: Int)

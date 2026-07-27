@@ -74,6 +74,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     var renameTarget by remember { mutableStateOf<Int?>(null) }
     var confirmClearAll by remember { mutableStateOf(false) }
     var performanceMode by remember { mutableStateOf(false) }
+    var footMode by remember { mutableStateOf(false) }
 
     trimTarget?.let { index ->
         val track = tracks.firstOrNull { it.index == index }
@@ -228,6 +229,22 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
     }
     val onExportToFileTap: () -> Unit = { saveToFile.launch(viewModel.suggestedExportName()) }
 
+    // FOOT MODE takes over the whole screen: giant targets, no chrome to
+    // mis-stomp. It replaces the normal layout rather than overlaying it, so
+    // nothing behind it can be triggered by a stray toe.
+    if (footMode) {
+        FootPedalScreen(
+            transport = transport,
+            tracks = tracks,
+            onLoopTap = viewModel::onSmartLoopButton,
+            onStopTap = viewModel::onStopTap,
+            onUndoTap = viewModel::onUndo,
+            onExit = { footMode = false },
+            modifier = Modifier.safeDrawingPadding(),
+        )
+        return
+    }
+
     Scaffold(
         // targetSdk 35 forces edge-to-edge, so inset the whole app into the
         // safe area — otherwise the transport bar hides behind the system
@@ -246,6 +263,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 onBpmChange = viewModel::onBpmChange,
                 onTapTempo = viewModel::onTapTempo,
                 onRhythmStyleToggle = viewModel::onToggleRhythmStyle,
+                onSpeedFollowsBpmToggle = viewModel::onToggleSpeedFollowsBpm,
                 onExportTap = onExportTap,
                 onExportToFileTap = onExportToFileTap,
                 onCountInToggle = viewModel::onCountInToggle,
@@ -260,6 +278,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 },
                 performanceMode = performanceMode,
                 onPerformanceToggle = { performanceMode = !performanceMode },
+                onFootModeToggle = { footMode = true },
                 onTimeSignatureTap = viewModel::onTimeSignatureChange,
                 onUndoTap = viewModel::onUndo,
                 onClearAllTap = { confirmClearAll = true },

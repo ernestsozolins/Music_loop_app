@@ -1875,11 +1875,26 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
     int32_t recOffset = mRecordOffset.load(std::memory_order_relaxed) % mLoopLen;
     if (recOffset < 0) recOffset += mLoopLen;
 
+    // Varispeed: the loop clock (and therefore every read) can run faster or
+    // slower than realtime, tape-style — pitch rides along with speed. Any
+    // pass being captured must stay sample-exact and beat-locked to what the
+    // performer hears, so recording forces 1.0 for the duration of the take.
+    double speed = static_cast<double>(mLoopSpeed.load(std::memory_order_relaxed));
+    if (!(speed > 0.05 && speed < 4.0)) speed = 1.0;  // also rejects NaN
+    for (int32_t t = 0; t < mConfig.trackCount; ++t) {
+      const uint8_t tp = mTracks[t].transport.load(std::memory_order_relaxed);
+      if (tp == static_cast<uint8_t>(TT::Recording) ||
+          tp == static_cast<uint8_t>(TT::Overdubbing)) {
+        speed = 1.0;
+        break;
+      }
+    }
+
     // Read (playback) targets.
     const float* srcs[kMaxTracks];
     float gainL[kMaxTracks];
     float gainR[kMaxTracks];
-    int32_t rd[kMaxTracks];
+    double rd[kMaxTracks];  // fractional: varispeed reads between samples
     int32_t rdTrack[kMaxTracks];
     int32_t trS[kMaxTracks];  // audible-window start (buffer frames)
     int32_t trE[kMaxTracks];  // audible-window end
@@ -1955,23 +1970,31 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
       float* o = out + static_cast<size_t>(f) * ch;
       const float* inF = in + static_cast<size_t>(f) * ch;
       for (int32_t a = 0; a < nRead; ++a) {
+        const int32_t i0 = static_cast<int32_t>(rd[a]);
         // Non-destructive trim: only the [trimStart, trimEnd) window sounds.
-        if (rd[a] >= trS[a] && rd[a] < trE[a]) {
+        if (i0 >= trS[a] && i0 < trE[a]) {
           float fg = 1.0f;
           if (trFade[a] > 0) {
-            const int32_t fromStart = rd[a] - trS[a];
-            const int32_t toEnd = trE[a] - rd[a];
+            const int32_t fromStart = i0 - trS[a];
+            const int32_t toEnd = trE[a] - i0;
             if (fromStart < trFade[a]) {
               fg = static_cast<float>(fromStart) / static_cast<float>(trFade[a]);
             } else if (toEnd <= trFade[a]) {
               fg = static_cast<float>(toEnd) / static_cast<float>(trFade[a]);
             }
           }
-          const float* s = srcs[a] + static_cast<size_t>(rd[a]) * ch;
-          o[0] += s[0] * gainL[a] * fg;
-          if (ch == 2) o[1] += s[1] * gainR[a] * fg;
+          // Linear interpolation between neighbouring frames. At speed 1.0 the
+          // fraction is exactly 0, so this is bit-identical to a plain read.
+          const float fr = static_cast<float>(rd[a] - i0);
+          int32_t i1 = i0 + 1;
+          if (i1 >= trE[a]) i1 = i0;  // never read past the audible window
+          const float* s0 = srcs[a] + static_cast<size_t>(i0) * ch;
+          const float* s1 = srcs[a] + static_cast<size_t>(i1) * ch;
+          o[0] += (s0[0] + (s1[0] - s0[0]) * fr) * gainL[a] * fg;
+          if (ch == 2) o[1] += (s0[1] + (s1[1] - s0[1]) * fr) * gainR[a] * fg;
         }
-        if (++rd[a] >= mLoopLen) rd[a] = 0;
+        rd[a] += speed;
+        while (rd[a] >= mLoopLen) rd[a] -= mLoopLen;
       }
       for (int32_t w = 0; w < nWrite; ++w) {
         if (f >= wCount[w]) continue;
@@ -1995,16 +2018,21 @@ void AudioEngine::renderLooper(float* out, const float* in, int32_t frames) {
     }
 
     // Advance the shared loop clock and publish it as each playing track's
-    // position (they are all locked to the same phase).
+    // position (they are all locked to the same phase). At speeds other than
+    // 1.0 the advance is fractional, so the remainder is carried in
+    // mPhaseCarry instead of being rounded away every block (which would drift).
     if (active) {
-      int32_t np = phaseStart + frames;
-      np %= mLoopLen;
+      mPhaseCarry += static_cast<double>(frames) * speed;
+      const int32_t whole = static_cast<int32_t>(mPhaseCarry);
+      mPhaseCarry -= whole;
+      int32_t np = (phaseStart + whole) % mLoopLen;
       setPlayhead(np);
     }
+    const int32_t advanced = static_cast<int32_t>(static_cast<double>(frames) * speed + 0.5);
     for (int32_t a = 0; a < nRead; ++a) {
       if (rdOneShot[a]) {
         // Advance the 1-shot's own playhead; stop it once the window is done.
-        const int32_t np = rdPosStart[a] + frames;
+        const int32_t np = rdPosStart[a] + advanced;
         mTracks[rdTrack[a]].pos = np;
         mTracks[rdTrack[a]].posFrames.store(std::min(np, trE[a]), std::memory_order_relaxed);
         if (np >= trE[a]) {

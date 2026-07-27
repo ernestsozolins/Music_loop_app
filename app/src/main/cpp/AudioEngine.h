@@ -275,6 +275,19 @@ class AudioEngine {
     mCountInBars.store(bars < 1 ? 1 : (bars > 8 ? 8 : bars), std::memory_order_relaxed);
   }
   int32_t countInBars() const { return mCountInBars.load(std::memory_order_relaxed); }
+
+  // ----- Loop varispeed (control thread) -----
+  // Plays the existing loop faster/slower, tape-style: 1.0 = as recorded,
+  // 1.2 = 20% faster. PITCH RIDES WITH SPEED (no time-stretching), so this is
+  // an opt-in practice aid — ramp a groove up to tempo — not a transparent
+  // tempo change. Clamped to [0.25, 2.0]. Any pass being recorded is captured
+  // at 1.0 regardless, so takes stay sample-exact and beat-locked.
+  void setLoopSpeed(float ratio) {
+    if (!(ratio > 0.0f)) ratio = 1.0f;  // also rejects NaN
+    mLoopSpeed.store(ratio < 0.25f ? 0.25f : (ratio > 2.0f ? 2.0f : ratio),
+                     std::memory_order_relaxed);
+  }
+  float loopSpeed() const { return mLoopSpeed.load(std::memory_order_relaxed); }
   // Countdown for the UI: beats remaining until recording begins during a
   // count-in, or 0 when no count-in is in progress. Lock-free UI read.
   int32_t countInBeatsRemaining() const {
@@ -703,6 +716,11 @@ class AudioEngine {
   // (beats remaining until recording begins), or 0 when not counting in.
   std::atomic<int32_t> mCountInDisplay{0};
   int32_t mMasterStopAt = 0;       // audio thread only; 0 = no scheduled stop
+
+  // Loop varispeed. mPhaseCarry keeps the sub-sample remainder of a fractional
+  // clock advance (audio thread only) so non-unity speeds don't drift.
+  std::atomic<float> mLoopSpeed{1.0f};
+  double mPhaseCarry = 0.0;
 
   // Current routing (mirrors mConfig.*DeviceId for lock-free UI reads;
   // authoritative value is changed under mLifecycleMutex in openStreams).

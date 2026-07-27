@@ -639,6 +639,12 @@ JNIEXPORT jboolean JNICALL Java_com_audio_loopstation_AudioEngine_nativeApplyTri
   return (engine != nullptr && engine->applyTrimToLoop(track)) ? JNI_TRUE : JNI_FALSE;
 }
 
+// Loop varispeed (1.0 = as recorded). Pitch rides with speed.
+JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetLoopSpeed(
+    JNIEnv*, jobject, jlong handle, jfloat ratio) {
+  if (AudioEngine* engine = fromHandle(handle)) engine->setLoopSpeed(ratio);
+}
+
 // ----- Play modes -----
 JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetTrackOneShot(
     JNIEnv*, jobject, jlong handle, jint track, jboolean oneShot) {

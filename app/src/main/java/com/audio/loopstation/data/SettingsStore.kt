@@ -30,6 +30,7 @@ class SettingsStore(context: Context) {
         val droneHz: Float = 220f,
         val droneGain: Float = 0.5f,
         val manualLatencyMs: Int = 0,
+        val speedFollowsBpm: Boolean = false,
     )
 
     fun load(): Snapshot {
@@ -53,6 +54,7 @@ class SettingsStore(context: Context) {
             droneHz = prefs.getFloat("droneHz", d.droneHz),
             droneGain = prefs.getFloat("droneGain", d.droneGain),
             manualLatencyMs = prefs.getInt("manualLatencyMs", d.manualLatencyMs),
+            speedFollowsBpm = prefs.getBoolean("speedFollowsBpm", d.speedFollowsBpm),
         )
     }
 
@@ -76,6 +78,7 @@ class SettingsStore(context: Context) {
             .putFloat("droneHz", s.droneHz)
             .putFloat("droneGain", s.droneGain)
             .putInt("manualLatencyMs", s.manualLatencyMs)
+            .putBoolean("speedFollowsBpm", s.speedFollowsBpm)
             .apply()
     }
 }

@@ -57,6 +57,7 @@ fun TransportBar(
     onBpmChange: (Int) -> Unit,
     onTapTempo: () -> Unit,
     onRhythmStyleToggle: () -> Unit,
+    onSpeedFollowsBpmToggle: () -> Unit,
     onExportTap: () -> Unit,
     onExportToFileTap: () -> Unit,
     onCountInToggle: () -> Unit,
@@ -68,6 +69,7 @@ fun TransportBar(
     onTunerTap: () -> Unit,
     performanceMode: Boolean,
     onPerformanceToggle: () -> Unit,
+    onFootModeToggle: () -> Unit,
     onTimeSignatureTap: () -> Unit,
     onUndoTap: () -> Unit,
     onClearAllTap: () -> Unit,
@@ -207,10 +209,32 @@ fun TransportBar(
                     onClick = onRhythmStyleToggle,
                     label = { Text(if (transport.rhythmBeat) "Beat" else "Click") },
                 )
+                // Varispeed: the recorded loop tracks the BPM knob. Tape-style,
+                // so the label warns that pitch moves with it.
+                FilterChip(
+                    selected = transport.speedFollowsBpm,
+                    onClick = onSpeedFollowsBpmToggle,
+                    label = {
+                        Text(
+                            if (transport.speedFollowsBpm) {
+                                "Speed ×%.2f".format(transport.loopSpeed)
+                            } else {
+                                "Speed follows BPM"
+                            },
+                        )
+                    },
+                )
                 FilterChip(
                     selected = performanceMode,
                     onClick = onPerformanceToggle,
                     label = { Text("Performance") },
+                )
+                // Hands-free: fills the screen with pedal-sized targets so the
+                // tablet can be played with a foot (no hardware pedal needed).
+                FilterChip(
+                    selected = false,
+                    onClick = onFootModeToggle,
+                    label = { Text("👣 Foot mode") },
                 )
                 TextButton(onClick = onTunerTap) { Text("Tuner") }
                 TextButton(onClick = onUndoTap) { Text("Undo") }

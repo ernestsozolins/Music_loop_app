@@ -111,6 +111,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val beatsPerMeasure: Int = 4,
         val beatInBar: Int = 0,
         val rhythmBeat: Boolean = false,  // false = click, true = drum backbeat
+        // Varispeed: play the recorded loop at the current tempo (pitch rides
+        // along, tape-style). Off by default; loopSpeed is the live ratio.
+        val speedFollowsBpm: Boolean = false,
+        val loopSpeed: Float = 1f,
         val monitorLevel: Float = 0f,  // software input monitoring, 0..1
         val singleMode: Boolean = false,  // Single: one track sounds at a time
         val exporting: Boolean = false,
@@ -330,6 +334,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             filterEnabled = f.enabled, filterCutoffNorm = f.cutoffNorm,
             filterResonance = f.resonance, filterMode = f.mode.ordinal,
             droneHz = d.hz, droneGain = d.gain, manualLatencyMs = _manualLatencyMs.value,
+            speedFollowsBpm = t.speedFollowsBpm,
         )
     }
 
@@ -366,6 +371,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 bpm = s.bpm, beatsPerMeasure = s.beatsPerMeasure, countIn = s.countIn,
                 countInBars = s.countInBars, quantize = s.quantize, syncToLoop = s.syncToLoop,
                 singleMode = s.singleMode, rhythmBeat = s.rhythmBeat, monitorLevel = s.monitorLevel,
+                speedFollowsBpm = s.speedFollowsBpm,
             )
         }
         _reverb.value = ReverbUiState(mix = s.reverbMix, roomSize = s.reverbRoom)
@@ -561,6 +567,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         val rate = engine.sampleRate
 
+        // Anchor the varispeed reference to the tempo the loop was captured at,
+        // and drop it when the loop goes away, so the ratio never compounds.
+        if (loopLen > 0 && loopBaseBpm <= 0) {
+            loopBaseBpm = _transport.value.bpm
+        } else if (loopLen == 0 && loopBaseBpm > 0) {
+            loopBaseBpm = 0
+            if (_transport.value.loopSpeed != 1f) {
+                engine.setLoopSpeed(1f)
+                _transport.update { it.copy(loopSpeed = 1f) }
+            }
+        }
+
         // …while the transport data class (structural equality => StateFlow
         // dedup) only emits on real state changes.
         _transport.update {
@@ -741,6 +759,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Lock-free hand-off; the engine applies it at the next beat boundary.
         engine.setMetronomeState(t.metronomeOn, bpm.toFloat(), t.beatsPerMeasure)
         _transport.update { it.copy(bpm = bpm) }
+        applyLoopSpeed(engine, bpm)
+    }
+
+    /**
+     * "Speed follows BPM": drag the recorded loop along with the tempo, so a
+     * groove can be practised up from slow to full speed. Tape-style — the
+     * pitch rises with the tempo — so it is opt-in and off by default.
+     * [loopBaseBpm] is the tempo the loop was recorded at; the ratio is
+     * relative to that, never compounding.
+     */
+    private fun applyLoopSpeed(engine: AudioEngine, bpm: Int) {
+        val t = _transport.value
+        val base = loopBaseBpm
+        val ratio = if (t.speedFollowsBpm && base > 0) bpm.toFloat() / base else 1f
+        engine.setLoopSpeed(ratio)
+        _transport.update { it.copy(loopSpeed = ratio) }
+    }
+
+    /** Tempo the current loop was captured at — the varispeed reference. */
+    private var loopBaseBpm: Int = 0
+
+    /** Toggle "loop speed follows BPM" (pitch changes with it). */
+    fun onToggleSpeedFollowsBpm() {
+        val engine = this.engine ?: return
+        val on = !_transport.value.speedFollowsBpm
+        _transport.update { it.copy(speedFollowsBpm = on) }
+        // Turning it on anchors "as recorded" to the tempo showing right now
+        // unless a loop already established one.
+        if (on && loopBaseBpm <= 0) loopBaseBpm = _transport.value.bpm
+        applyLoopSpeed(engine, _transport.value.bpm)
     }
 
     private val tapTimes = ArrayDeque<Long>()
