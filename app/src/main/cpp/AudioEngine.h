@@ -417,6 +417,19 @@ class AudioEngine {
   void setTrackTrim(int32_t track, int32_t startFrames, int32_t endFrames);
   int32_t trackTrimStart(int32_t track) const;
   int32_t trackTrimEnd(int32_t track) const;  // resolves the 0 sentinel to loopLen
+
+  // Commit a trim window as the ACTUAL loop: the shared loop is shortened to
+  // the window and every track's audio is shifted so the window start becomes
+  // the new loop top. All tracks are phase-locked to one clock, so they are
+  // all cropped to the same [start, end) region and stay in sync with each
+  // other; audio outside the window is discarded. This is what "trim the loop"
+  // means to a performer — setTrackTrim alone only mutes the ends and leaves
+  // the loop its original length.
+  //
+  // BLOCKS ~40 ms (freezes the mixer, moves multi-MB buffers) — call OFF the
+  // main thread. Returns false if there is no loop, the window is empty, or an
+  // export/undo is in flight.
+  bool applyTrimToLoop(int32_t track);
   // Scans a track's audio (read-only; any non-realtime thread) and sets its
   // trim window to the region above `thresholdDb`, dropping leading/trailing
   // silence. A small pre-roll/tail margin is kept. No-op on an empty track.
@@ -505,6 +518,8 @@ class AudioEngine {
     UndoMute,       // mixer stops reading a track so undo can rewrite it
     UndoCommit,     // undo finished rewriting: content is valid again
     ResetForRestore,  // immediate loop/content reset without wiping buffers
+    TrimFreeze,     // mixer stops reading every track so trim can crop buffers
+    TrimCommit,     // adopt the cropped loop (mTrimNewLen / mTrimRestoreMask)
   };
   struct Command {
     CommandType type;
@@ -744,6 +759,16 @@ class AudioEngine {
   std::atomic<bool> mUndoActive{false};
   bool mUndoHadContent = false;  // guarded by mUndoMutex
   int32_t mUndoLoopLen = 0;      // guarded by mUndoMutex
+
+  // Destructive trim-to-loop (applyTrimToLoop). The control thread freezes the
+  // mixer with TrimFreeze, crops the buffers, then publishes the new length +
+  // which tracks still hold content; TrimCommit adopts them on the audio
+  // thread (ordered by the command queue's release/acquire pair).
+  uint32_t mTrimRestoreMask = 0;
+  int32_t mTrimNewLen = 0;
+  // Which tracks held content when the freeze landed (audio thread writes it
+  // during TrimFreeze; the control thread reads it after the freeze settles).
+  bool mTrimHadContent[kMaxTracks] = {};
 
   // Event push to the JNI layer (error thread -> Kotlin).
   std::mutex mEventMutex;

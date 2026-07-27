@@ -86,6 +86,7 @@ fun MainScreen(viewModel: MainViewModel, twoPane: Boolean = false) {
                 bins = trackWaveforms[index],
                 onChange = { s, e -> viewModel.onSetTrackTrim(index, s, e) },
                 onAutoTrim = { viewModel.autoTrimAndGet(index) },
+                onApplyToLoop = { viewModel.onApplyTrimToLoop(index) },
                 onDismiss = { trimTarget = null },
             )
         } else {

@@ -631,6 +631,14 @@ JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeAutoTrimTrac
   if (AudioEngine* engine = fromHandle(handle)) engine->autoTrimTrack(track);
 }
 
+// Crop the shared loop to the track's trim window. BLOCKS ~40 ms — Kotlin
+// calls this off the main thread.
+JNIEXPORT jboolean JNICALL Java_com_audio_loopstation_AudioEngine_nativeApplyTrimToLoop(
+    JNIEnv*, jobject, jlong handle, jint track) {
+  AudioEngine* engine = fromHandle(handle);
+  return (engine != nullptr && engine->applyTrimToLoop(track)) ? JNI_TRUE : JNI_FALSE;
+}
+
 // ----- Play modes -----
 JNIEXPORT void JNICALL Java_com_audio_loopstation_AudioEngine_nativeSetTrackOneShot(
     JNIEnv*, jobject, jlong handle, jint track, jboolean oneShot) {

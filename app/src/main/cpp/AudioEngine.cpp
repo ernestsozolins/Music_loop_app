@@ -881,6 +881,59 @@ void AudioEngine::autoTrimTrack(int32_t track, float thresholdDb) {
   mTracks[track].trimEnd.store(e >= len ? 0 : e, std::memory_order_relaxed);
 }
 
+// Commit a trim window as the real loop. Every track shares one clock, so all
+// of them are cropped to the same [s, e) region: the loop gets shorter and the
+// layers stay locked to each other. Audio outside the window is discarded.
+bool AudioEngine::applyTrimToLoop(int32_t track) {
+  std::lock_guard<std::mutex> lock(mUndoMutex);
+  if (track < 0 || track >= mConfig.trackCount) return false;
+  const int32_t loopLen = mLoopLengthFrames.load(std::memory_order_acquire);
+  if (loopLen <= 0) return false;
+  if (mExportState.load(std::memory_order_acquire) == kExportRunning) return false;
+  if (mRestoreActive.load(std::memory_order_acquire)) return false;
+
+  // Resolve the window (trimEnd == 0 means "to the loop end").
+  int32_t s = mTracks[track].trimStart.load(std::memory_order_acquire);
+  int32_t e = mTracks[track].trimEnd.load(std::memory_order_acquire);
+  if (e <= 0 || e > loopLen) e = loopLen;
+  s = clampi(s, 0, loopLen);
+  const int32_t newLen = e - s;
+  if (newLen <= 0) return false;
+  if (s == 0 && newLen == loopLen) return true;  // nothing to crop
+
+  const int32_t ch = mConfig.channelCount;
+
+  // Freeze: the mixer stops reading every track so the buffers can be moved
+  // off the audio thread (same handshake as undo, widened to all tracks).
+  mUndoActive.store(true, std::memory_order_release);
+  pushCommand({CommandType::TrimFreeze, 0});
+  if (isRunning()) std::this_thread::sleep_for(std::chrono::milliseconds(40));
+
+  uint32_t mask = 0;
+  for (int32_t t = 0; t < mConfig.trackCount; ++t) {
+    if (!mTrimHadContent[t]) continue;  // set by the TrimFreeze command
+    float* d = mTracks[t].data.data();
+    // Shift [s, e) down to the buffer start, then clear the tail so a later
+    // longer loop can never read stale audio.
+    std::memmove(d, d + static_cast<size_t>(s) * ch,
+                 static_cast<size_t>(newLen) * ch * sizeof(float));
+    std::memset(d + static_cast<size_t>(newLen) * ch, 0,
+                static_cast<size_t>(mMaxLoopFrames - newLen) * ch * sizeof(float));
+    mask |= (1u << t);
+  }
+
+  // The undo snapshot describes the pre-crop layout, which no longer exists.
+  mUndoTrack.store(-1, std::memory_order_release);
+  mUndoHadContent = false;
+
+  mTrimRestoreMask = mask;
+  mTrimNewLen = newLen;
+  mUndoActive.store(false, std::memory_order_release);
+  pushCommand({CommandType::TrimCommit, 0});
+  LOGI("trim: cropped loop to [%d, %d) -> %d frames", s, e, newLen);
+  return true;
+}
+
 void AudioEngine::setMonitorGain(float gain) {
   mMonitorGain.store(clampf(gain, 0.0f, 2.0f), std::memory_order_relaxed);
 }
@@ -1361,6 +1414,46 @@ void AudioEngine::applyCommand(const Command& cmd) {
       mTracks[clampTrackIndex(cmd.intArg)].hasContent.store(true, std::memory_order_relaxed);
       break;
     }
+    case CommandType::TrimFreeze: {
+      // Stop the mixer reading anything so the control thread can crop the
+      // buffers, and record which tracks actually held audio.
+      mState.store(EngineState::Idle, std::memory_order_relaxed);
+      mMasterRecordPos = 0;
+      mMasterStopAt = 0;
+      for (int32_t t = 0; t < mConfig.trackCount; ++t) {
+        mTrimHadContent[t] = mTracks[t].hasContent.load(std::memory_order_relaxed);
+        mTracks[t].hasContent.store(false, std::memory_order_relaxed);
+        mTracks[t].transport.store(static_cast<uint8_t>(TrackTransport::Empty),
+                                   std::memory_order_relaxed);
+        mTracks[t].pos = 0;
+        mTracks[t].recPos = 0;
+        mTracks[t].posFrames.store(0, std::memory_order_relaxed);
+      }
+      setPlayhead(0);
+      break;
+    }
+    case CommandType::TrimCommit: {
+      // Adopt the cropped loop: shorter length, windows reset to the whole
+      // (now cropped) take, every surviving track parked at the top.
+      setLoopLength(mTrimNewLen);
+      setPlayhead(0);
+      int32_t firstContent = -1;
+      for (int32_t t = 0; t < mConfig.trackCount; ++t) {
+        mTracks[t].trimStart.store(0, std::memory_order_relaxed);
+        mTracks[t].trimEnd.store(0, std::memory_order_relaxed);
+        mTracks[t].playOffset.store(0, std::memory_order_relaxed);  // crop rebases timing
+        if (mTrimRestoreMask & (1u << t)) {
+          mTracks[t].hasContent.store(true, std::memory_order_relaxed);
+          mTracks[t].transport.store(static_cast<uint8_t>(TrackTransport::Stopped),
+                                     std::memory_order_relaxed);
+          if (firstContent < 0) firstContent = t;
+        }
+      }
+      if (firstContent >= 0) mMasterTrack = firstContent;
+      mState.store(mTrimNewLen > 0 ? EngineState::Stopped : EngineState::Idle,
+                   std::memory_order_relaxed);
+      break;
+    }
     case CommandType::ResetForRestore: {
       // Drop loop + content immediately, no amortized wipe (restore
       // overwrites the buffers). Only from a quiet transport.
@@ -1616,9 +1709,14 @@ void AudioEngine::finalizeTrackRecord(int32_t track) {
   t.transport.store(static_cast<uint8_t>(TrackTransport::Playing), std::memory_order_relaxed);
 }
 
-// Whole-bar length in frames at the current tempo, or 0 if the click is off.
+// Whole-bar length in frames at the current tempo.
+//
+// The tempo is always well-defined (the UI owns BPM + time signature), so this
+// does NOT depend on the click being audible: "Whole bars" is its own opt-in
+// and must round the loop whether or not the performer wants to hear a click.
+// Gating this on mMetronome.isActive() silently disabled bar-rounding for
+// anyone playing without the click.
 int32_t AudioEngine::barFramesOrZero() const {
-  if (!mMetronome.isActive()) return 0;
   float bpm = 120.0f;
   int32_t beats = 4;
   mMetronome.tempo(bpm, beats);

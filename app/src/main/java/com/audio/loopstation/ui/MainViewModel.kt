@@ -979,6 +979,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return engine.trackTrimStartMillis(index) to engine.trackTrimEndMillis(index)
     }
 
+    /**
+     * Commit the trim window as the actual loop: the loop gets SHORTER and every
+     * track is cropped to the same region so the layers stay in sync. Audio
+     * outside the window is discarded, so the UI confirms first.
+     */
+    fun onApplyTrimToLoop(index: Int, onDone: () -> Unit = {}) {
+        val engine = this.engine ?: return
+        viewModelScope.launch {
+            val changed = engine.applyTrimToLoop(index)
+            if (changed) {
+                // The crop rebased every buffer: refresh the offline waveforms.
+                prevContentBits = 0
+                for (t in _tracks.value) refreshTrackWaveform(t.index)
+            }
+            onDone()
+        }
+    }
+
     // ---- Play modes ----
 
     /** Toggle a track between Loop and 1-Shot playback. */

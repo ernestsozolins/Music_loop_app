@@ -17,6 +17,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -36,6 +37,12 @@ import kotlinx.coroutines.launch
  * set the audible window (start / end). Everything is applied live through
  * [onChange] so the change is heard while dragging the sliders. Auto-trim runs
  * the engine's silence detector; Reset restores the full take.
+ *
+ * Moving the handles only MUTES the ends — the loop keeps its original length.
+ * "Shorten loop to this" ([onApplyToLoop]) commits the window as the actual
+ * loop: every track is cropped to the same region (so the layers stay in sync)
+ * and the loop repeats sooner. That discards the audio outside the window, so
+ * it asks for confirmation first.
  */
 @Composable
 fun TrimEditorDialog(
@@ -46,6 +53,7 @@ fun TrimEditorDialog(
     bins: FloatArray?,
     onChange: (startMs: Int, endMs: Int) -> Unit,
     onAutoTrim: suspend () -> Pair<Int, Int>,
+    onApplyToLoop: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -55,6 +63,7 @@ fun TrimEditorDialog(
     var endMs by remember {
         mutableIntStateOf(if (initialEndMs <= 0 || initialEndMs > safeLoop) safeLoop else initialEndMs)
     }
+    var confirmApply by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -64,7 +73,8 @@ fun TrimEditorDialog(
             Column {
                 Text(
                     "The whole take is kept — only the highlighted window plays. " +
-                        "Move the handles or auto-trim the silence.",
+                        "Move the handles or auto-trim the silence. To make the loop " +
+                        "itself shorter, use “Shorten loop to this”.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -109,9 +119,52 @@ fun TrimEditorDialog(
                         onChange(0, safeLoop)
                     }) { Text("Reset") }
                 }
+                // Commit the window as the real loop length. Destructive, so
+                // it confirms — and it is disabled when nothing would change.
+                val wouldChange = startMs > 0 || endMs < safeLoop
+                Button(
+                    onClick = { confirmApply = true },
+                    enabled = wouldChange,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp),
+                ) {
+                    Text(
+                        if (wouldChange) {
+                            "Shorten loop to this (%.1fs)".format((endMs - startMs) / 1000f)
+                        } else {
+                            "Shorten loop to this"
+                        },
+                    )
+                }
             }
         },
     )
+
+    if (confirmApply) {
+        AlertDialog(
+            onDismissRequest = { confirmApply = false },
+            title = { Text("Shorten the loop?") },
+            text = {
+                Text(
+                    "The loop becomes %.1fs. Every track is cropped to the same region so "
+                        .format((endMs - startMs) / 1000f) +
+                        "they stay in sync. Audio outside the window is discarded — this " +
+                        "can't be undone.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmApply = false
+                    onApplyToLoop()
+                    onDismiss()
+                }) { Text("Shorten") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmApply = false }) { Text("Cancel") }
+            },
+        )
+    }
 }
 
 @Composable

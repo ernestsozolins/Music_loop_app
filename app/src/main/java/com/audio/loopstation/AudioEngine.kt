@@ -533,6 +533,16 @@ class AudioEngine private constructor(private var handle: Long) {
         if (handle != 0L) nativeAutoTrimTrack(handle, track)
     }
 
+    /**
+     * Commit the track's trim window as the real loop: the shared loop is
+     * shortened to the window and every track is cropped to the same region so
+     * the layers stay in sync. Discards audio outside the window. Blocks ~40 ms,
+     * so it runs off the main thread. Returns true if the loop changed.
+     */
+    suspend fun applyTrimToLoop(track: Int): Boolean = withContext(Dispatchers.IO) {
+        if (handle == 0L) false else nativeApplyTrimToLoop(handle, track)
+    }
+
     // ------------------------------------------------------------------
     // Play modes: per-track loop vs 1-shot, and global Single/Multi.
     // ------------------------------------------------------------------
@@ -904,6 +914,7 @@ class AudioEngine private constructor(private var handle: Long) {
     private external fun nativeGetTrackTrimStart(handle: Long, track: Int): Int
     private external fun nativeGetTrackTrimEnd(handle: Long, track: Int): Int
     private external fun nativeAutoTrimTrack(handle: Long, track: Int)
+    private external fun nativeApplyTrimToLoop(handle: Long, track: Int): Boolean
     private external fun nativeSetTrackOneShot(handle: Long, track: Int, oneShot: Boolean)
     private external fun nativeSetPlayMode(handle: Long, mode: Int)
     private external fun nativeSetTrackFade(handle: Long, track: Int, frames: Int)
